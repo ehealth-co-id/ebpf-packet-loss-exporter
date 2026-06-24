@@ -134,4 +134,4 @@ curl -s localhost:9435/metrics | grep ebpf_packet_loss_percent_ema
 - Passive TCP — requires real production traffic
 - Quiet paths: EMA holds last value; instant may be 0
 - TCP IPv4 only
-- TCX egress attach (kernel 6.6+)
+- TCX egress on kernel 6.6+; clsact TC egress fallback on older kernels
