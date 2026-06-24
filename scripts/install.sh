@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Configuration
-REPO="ehealth-id/ebpf-packet-loss-exporter"
+REPO="ehealth-co-id/ebpf-packet-loss-exporter"
 SERVICE_NAME="ebpf_packet_loss_exporter"
 INSTALL_DIR="/opt/ebpf_packet_loss_exporter"
 CONFIG_DIR="/etc/ebpf_packet_loss_exporter"
