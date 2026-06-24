@@ -65,8 +65,7 @@ type PacketLossMapSpecs struct {
 	DebugTcpPayload *ebpf.MapSpec `ebpf:"debug_tcp_payload"`
 	DebugTcpZoned   *ebpf.MapSpec `ebpf:"debug_tcp_zoned"`
 	SrcZoneLpm      *ebpf.MapSpec `ebpf:"src_zone_lpm"`
-	TcpRetrans      *ebpf.MapSpec `ebpf:"tcp_retrans"`
-	TcpSegments     *ebpf.MapSpec `ebpf:"tcp_segments"`
+	StatsRb         *ebpf.MapSpec `ebpf:"stats_rb"`
 	ZoneLpm         *ebpf.MapSpec `ebpf:"zone_lpm"`
 }
 
@@ -94,8 +93,7 @@ type PacketLossMaps struct {
 	DebugTcpPayload *ebpf.Map `ebpf:"debug_tcp_payload"`
 	DebugTcpZoned   *ebpf.Map `ebpf:"debug_tcp_zoned"`
 	SrcZoneLpm      *ebpf.Map `ebpf:"src_zone_lpm"`
-	TcpRetrans      *ebpf.Map `ebpf:"tcp_retrans"`
-	TcpSegments     *ebpf.Map `ebpf:"tcp_segments"`
+	StatsRb         *ebpf.Map `ebpf:"stats_rb"`
 	ZoneLpm         *ebpf.Map `ebpf:"zone_lpm"`
 }
 
@@ -106,8 +104,7 @@ func (m *PacketLossMaps) Close() error {
 		m.DebugTcpPayload,
 		m.DebugTcpZoned,
 		m.SrcZoneLpm,
-		m.TcpRetrans,
-		m.TcpSegments,
+		m.StatsRb,
 		m.ZoneLpm,
 	)
 }

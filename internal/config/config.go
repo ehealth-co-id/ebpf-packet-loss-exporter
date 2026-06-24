@@ -65,7 +65,7 @@ func Load(path string) (*Config, error) {
 
 	cfg := &Config{
 		Listen:       ":9435",
-		PollInterval: 15 * time.Second,
+		PollInterval: 1 * time.Second,
 		EMA: EMAConfig{
 			HalfLife: 5 * time.Minute,
 		},

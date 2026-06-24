@@ -6,6 +6,7 @@ import (
 	"net"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/ringbuf"
 	"github.com/ehealth-id/ebpf-packet-loss-exporter/internal/config"
 )
 
@@ -14,10 +15,12 @@ type zoneLpmKey struct {
 	Addr      uint32
 }
 
-type counterKey struct {
+// StatsEvent mirrors struct stats_event in bpf/packet_loss.bpf.c.
+type StatsEvent struct {
 	IfIndex   uint32
 	DstZoneID uint8
-	Pad       [3]uint8
+	IsRetrans uint8
+	Pad       uint16
 }
 
 type Collection struct {
@@ -69,21 +72,8 @@ func (c *Collection) AddLink(l linkCloser) {
 	c.links = append(c.links, l)
 }
 
-func (c *Collection) ReadCounters(target config.ResolvedTarget) (segments, retrans uint64, err error) {
-	key := counterKey{
-		IfIndex:   uint32(target.IfIndex),
-		DstZoneID: target.ZoneID,
-	}
-
-	segments, err = sumPerCPU(c.objs.TcpSegments, key)
-	if err != nil {
-		return 0, 0, nil
-	}
-	retrans, err = sumPerCPU(c.objs.TcpRetrans, key)
-	if err != nil {
-		return segments, 0, nil
-	}
-	return segments, retrans, nil
+func (c *Collection) NewRingbufReader() (*ringbuf.Reader, error) {
+	return ringbuf.NewReader(c.objs.StatsRb)
 }
 
 func (c *Collection) ReadDebugCounters() (DebugCounters, error) {
@@ -137,23 +127,4 @@ func sumPerCPU(m *ebpf.Map, key interface{}) (uint64, error) {
 func sumPerCPUArray(m *ebpf.Map) (uint64, error) {
 	var key uint32
 	return sumPerCPU(m, key)
-}
-
-// ReadAllCounterKeys aggregates every BPF counter entry for debugging.
-func (c *Collection) ReadAllCounterKeys() (map[counterKey]uint64, error) {
-	out := make(map[counterKey]uint64)
-	iter := c.objs.TcpSegments.Iterate()
-	var key counterKey
-	var vals []uint64
-	for iter.Next(&key, &vals) {
-		var total uint64
-		for _, v := range vals {
-			total += v
-		}
-		out[key] = total
-	}
-	if err := iter.Err(); err != nil {
-		return nil, err
-	}
-	return out, nil
 }

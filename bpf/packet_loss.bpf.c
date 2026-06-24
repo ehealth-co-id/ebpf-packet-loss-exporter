@@ -27,10 +27,11 @@ struct bloom_epoch_state {
 	__u64 start_ns;
 };
 
-struct counter_key {
+struct stats_event {
 	__u32 ifindex;
 	__u8  dst_zone_id;
-	__u8  pad[3];
+	__u8  is_retrans;
+	__u16 pad;
 };
 
 struct {
@@ -64,18 +65,9 @@ struct {
 } bloom_epoch SEC(".maps");
 
 struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
-	__uint(max_entries, 4096);
-	__uint(key_size, sizeof(struct counter_key));
-	__uint(value_size, sizeof(__u64));
-} tcp_segments SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_HASH);
-	__uint(max_entries, 4096);
-	__uint(key_size, sizeof(struct counter_key));
-	__uint(value_size, sizeof(__u64));
-} tcp_retrans SEC(".maps");
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, 1 << 16); /* 64 KB */
+} stats_rb SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -120,20 +112,6 @@ static __always_inline int parse_ipv4(struct __sk_buff *skb, void *data, void *d
 	}
 
 	return -1;
-}
-
-static __always_inline void bump_counter(void *map, const struct counter_key *key, __u64 delta)
-{
-	__u64 *val = bpf_map_lookup_elem(map, key);
-
-	if (!val) {
-		__u64 zero = 0;
-
-		bpf_map_update_elem(map, key, &zero, BPF_NOEXIST);
-		val = bpf_map_lookup_elem(map, key);
-	}
-	if (val)
-		__sync_fetch_and_add(val, delta);
 }
 
 static __always_inline __u32 bloom_hash(__u32 saddr, __u32 daddr, __u16 sport,
@@ -245,13 +223,14 @@ int path_egress(struct __sk_buff *skb)
 	__u32 lpm_key[2];
 	__u8 *zone_id;
 	__u8 *src_zone;
-	struct counter_key ckey = {};
 	__u64 now;
 	__u32 seq;
 	__u32 seq_key;
 	__u8 fin;
 	__u8 syn;
 	__u8 rst;
+	__u8 is_retrans;
+	struct stats_event *evt;
 
 	if (bpf_skb_pull_data(skb, 0) < 0)
 		return TC_ACT_OK;
@@ -304,27 +283,27 @@ int path_egress(struct __sk_buff *skb)
 
 	debug_inc(&debug_tcp_zoned);
 
-	ckey.ifindex = skb->ifindex;
-	ckey.dst_zone_id = *zone_id;
-
 	now = bpf_ktime_get_ns();
 	bloom_maybe_roll_epoch(now);
 
 	seq = bpf_ntohl(tcph->seq);
-	bump_counter(&tcp_segments, &ckey, 1);
+	is_retrans = 0;
 
 	if (payload_len > 0) {
 		seq_key = seq >> 4;
-		if (bloom_test_and_set(iph->saddr, iph->daddr, tcph->source,
-				       tcph->dest, seq_key))
-			bump_counter(&tcp_retrans, &ckey, 1);
-		return TC_ACT_OK;
+		is_retrans = bloom_test_and_set(iph->saddr, iph->daddr, tcph->source,
+						tcph->dest, seq_key);
+	} else if (syn && !tcph->ack) {
+		is_retrans = bloom_test_and_set(iph->saddr, iph->daddr, tcph->source,
+						tcph->dest, seq);
 	}
 
-	if (syn && !tcph->ack) {
-		if (bloom_test_and_set(iph->saddr, iph->daddr, tcph->source,
-				       tcph->dest, seq))
-			bump_counter(&tcp_retrans, &ckey, 1);
+	evt = bpf_ringbuf_reserve(&stats_rb, sizeof(*evt), 0);
+	if (evt) {
+		evt->ifindex = skb->ifindex;
+		evt->dst_zone_id = *zone_id;
+		evt->is_retrans = is_retrans ? 1 : 0;
+		bpf_ringbuf_submit(evt, 0);
 	}
 
 	return TC_ACT_OK;
