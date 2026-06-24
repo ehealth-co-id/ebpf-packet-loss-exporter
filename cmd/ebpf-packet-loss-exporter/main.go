@@ -8,7 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"os/signal"
 	"sync"
@@ -22,58 +21,53 @@ import (
 	"github.com/ehealth-id/ebpf-packet-loss-exporter/internal/tcattach"
 )
 
-type targetKey struct {
-	ifIndex int
-	zoneID  uint8
-}
-
 type accumulator struct {
 	mu   sync.Mutex
 	segs map[string]uint64
 	rets map[string]uint64
 }
 
-func newAccumulator(targets []config.ResolvedTarget) *accumulator {
+func newAccumulator(zones []config.ResolvedZone) *accumulator {
 	acc := &accumulator{
-		segs: make(map[string]uint64, len(targets)),
-		rets: make(map[string]uint64, len(targets)),
+		segs: make(map[string]uint64, len(zones)),
+		rets: make(map[string]uint64, len(zones)),
 	}
-	for _, t := range targets {
-		acc.segs[t.Name] = 0
-		acc.rets[t.Name] = 0
+	for _, z := range zones {
+		acc.segs[z.DstZone] = 0
+		acc.rets[z.DstZone] = 0
 	}
 	return acc
 }
 
-func (acc *accumulator) record(name string, isRetrans bool) {
+func (acc *accumulator) record(dstZone string, isRetrans bool) {
 	acc.mu.Lock()
 	defer acc.mu.Unlock()
-	acc.segs[name]++
+	acc.segs[dstZone]++
 	if isRetrans {
-		acc.rets[name]++
+		acc.rets[dstZone]++
 	}
 }
 
-func (acc *accumulator) snapshotAndReset(targets []config.ResolvedTarget) map[string]metrics.CounterSnapshot {
+func (acc *accumulator) snapshotAndReset(zones []config.ResolvedZone) map[string]metrics.CounterSnapshot {
 	acc.mu.Lock()
 	defer acc.mu.Unlock()
 
-	counters := make(map[string]metrics.CounterSnapshot, len(targets))
-	for _, t := range targets {
-		counters[t.Name] = metrics.CounterSnapshot{
-			Segments: acc.segs[t.Name],
-			Retrans:  acc.rets[t.Name],
+	counters := make(map[string]metrics.CounterSnapshot, len(zones))
+	for _, z := range zones {
+		counters[z.DstZone] = metrics.CounterSnapshot{
+			Segments: acc.segs[z.DstZone],
+			Retrans:  acc.rets[z.DstZone],
 		}
-		acc.segs[t.Name] = 0
-		acc.rets[t.Name] = 0
+		acc.segs[z.DstZone] = 0
+		acc.rets[z.DstZone] = 0
 	}
 	return counters
 }
 
-func buildTargetIndex(targets []config.ResolvedTarget) map[targetKey]string {
-	out := make(map[targetKey]string, len(targets))
-	for _, t := range targets {
-		out[targetKey{ifIndex: t.IfIndex, zoneID: t.ZoneID}] = t.Name
+func buildZoneIndex(zones []config.ResolvedZone) map[uint8]string {
+	out := make(map[uint8]string, len(zones))
+	for _, z := range zones {
+		out[z.ZoneID] = z.DstZone
 	}
 	return out
 }
@@ -89,7 +83,7 @@ func parseStatsEvent(raw []byte) (bpf.StatsEvent, error) {
 	return evt, nil
 }
 
-func startRingbufReader(ctx context.Context, rd *ringbuf.Reader, targetByKey map[targetKey]string, acc *accumulator) {
+func startRingbufReader(ctx context.Context, rd *ringbuf.Reader, zoneByID map[uint8]string, acc *accumulator) {
 	go func() {
 		for {
 			rec, err := rd.Read()
@@ -107,11 +101,11 @@ func startRingbufReader(ctx context.Context, rd *ringbuf.Reader, targetByKey map
 				continue
 			}
 
-			name, ok := targetByKey[targetKey{ifIndex: int(evt.IfIndex), zoneID: evt.DstZoneID}]
+			dstZone, ok := zoneByID[evt.DstZoneID]
 			if !ok {
 				continue
 			}
-			acc.record(name, evt.IsRetrans != 0)
+			acc.record(dstZone, evt.IsRetrans != 0)
 		}
 	}()
 }
@@ -147,17 +141,13 @@ func main() {
 	}
 	defer coll.Close()
 
-	ifIndexByName, err := resolveInterfaces(cfg)
+	ifaceNames, err := config.DiscoverTransitInterfaces(cfg.Interfaces.Ignore)
 	if err != nil {
 		log.Fatalf("interfaces: %v", err)
 	}
 
-	targets, err := cfg.ResolveTargets(ifIndexByName)
-	if err != nil {
-		log.Fatalf("targets: %v", err)
-	}
+	zones := cfg.RemoteZones()
 
-	ifaceNames := cfg.InterfaceNames()
 	attachments, err := tcattach.AttachAll(ifaceNames, coll.Program(), coll)
 	if err != nil {
 		log.Fatalf("tc attach: %v", err)
@@ -168,11 +158,10 @@ func main() {
 		}
 	}()
 
-	log.Printf("attached TC egress on %v", ifaceNames)
-	log.Printf("metrics reflect transit TCP from source_zone=%q to remote zones; attach only on listed path interfaces", cfg.SourceZone)
-	for _, t := range targets {
-		log.Printf("target %s: ifindex=%d zone_id=%d path=%s dst_zone=%s",
-			t.Name, t.IfIndex, t.ZoneID, t.Path, t.DstZone)
+	log.Printf("attached TC egress on %v (auto-discovered)", ifaceNames)
+	log.Printf("metrics reflect transit TCP from source_zone=%q to remote zones", cfg.SourceZone)
+	for _, z := range zones {
+		log.Printf("zone %s: zone_id=%d", z.DstZone, z.ZoneID)
 	}
 
 	rd, err := coll.NewRingbufReader()
@@ -180,10 +169,10 @@ func main() {
 		log.Fatalf("ringbuf reader: %v", err)
 	}
 
-	ema := metrics.NewEMAStore(cfg, targets)
+	ema := metrics.NewEMAStore(cfg, zones)
 	prom := metrics.NewExporter()
-	acc := newAccumulator(targets)
-	targetByKey := buildTargetIndex(targets)
+	acc := newAccumulator(zones)
+	zoneByID := buildZoneIndex(zones)
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", prom.Handler())
@@ -203,18 +192,15 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	startRingbufReader(ctx, rd, targetByKey, acc)
+	startRingbufReader(ctx, rd, zoneByID, acc)
 
 	ticker := time.NewTicker(cfg.PollInterval)
 	defer ticker.Stop()
 
 	publish := func() {
-		counters := acc.snapshotAndReset(targets)
+		counters := acc.snapshotAndReset(zones)
 		ema.Update(time.Now(), counters)
 		prom.Publish(ema.Snapshot())
-		if dbg, err := coll.ReadDebugCounters(); err == nil {
-			prom.PublishDebug(dbg.TCPPackets, dbg.TCPZoned)
-		}
 	}
 
 	publish()
@@ -231,22 +217,4 @@ func main() {
 			publish()
 		}
 	}
-}
-
-func resolveInterfaces(cfg *config.Config) (map[string]int, error) {
-	out := make(map[string]int)
-	for _, name := range cfg.InterfaceNames() {
-		if cfg.ShouldIgnore(name) {
-			return nil, fmt.Errorf("interface %q is configured for monitoring and listed in ignore", name)
-		}
-		iface, err := net.InterfaceByName(name)
-		if err != nil {
-			return nil, fmt.Errorf("lookup %q: %w", name, err)
-		}
-		out[name] = iface.Index
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("no transit interfaces configured")
-	}
-	return out, nil
 }

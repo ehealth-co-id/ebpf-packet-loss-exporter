@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -11,37 +12,19 @@ import (
 )
 
 type Config struct {
-	SourceZone    string        `yaml:"source_zone"`
-	Listen        string        `yaml:"listen"`
-	PollInterval  time.Duration `yaml:"poll_interval"`
-	InstantWindow time.Duration `yaml:"instant_window"`
-	Interfaces    Interfaces    `yaml:"interfaces"`
-	Zones        map[string]Zone `yaml:"zones"`
-	Targets      []Target      `yaml:"targets"`
-	EMA          EMAConfig     `yaml:"ema"`
+	SourceZone    string              `yaml:"source_zone"`
+	Listen        string              `yaml:"listen"`
+	PollInterval  time.Duration       `yaml:"poll_interval"`
+	InstantWindow time.Duration       `yaml:"instant_window"`
+	Interfaces    Interfaces          `yaml:"interfaces,omitempty"`
+	Zones         map[string][]string `yaml:"zones"`
+	EMAHalfLife   time.Duration       `yaml:"ema_half_life"`
+
+	zoneIDs map[string]uint8
 }
 
 type Interfaces struct {
-	Wireguard []string `yaml:"wireguard"`
-	L2        []string `yaml:"l2"`
-	Ignore    []string `yaml:"ignore"`
-}
-
-type Zone struct {
-	ID      uint8    `yaml:"id"`
-	Subnets []string `yaml:"subnets"`
-}
-
-type Target struct {
-	Name    string `yaml:"name"`
-	Host    string `yaml:"host,omitempty"`
-	DstZone string `yaml:"dst_zone"`
-	Path    string `yaml:"path"`
-}
-
-type EMAConfig struct {
-	HalfLife time.Duration `yaml:"half_life"`
-	Alpha    *float64      `yaml:"alpha,omitempty"`
+	Ignore []string `yaml:"ignore,omitempty"`
 }
 
 type ZoneEntry struct {
@@ -49,12 +32,9 @@ type ZoneEntry struct {
 	Prefix net.IPNet
 }
 
-type ResolvedTarget struct {
-	Name       string
+type ResolvedZone struct {
 	DstZone    string
-	Path       string
 	ZoneID     uint8
-	IfIndex    int
 	SourceZone string
 }
 
@@ -68,9 +48,7 @@ func Load(path string) (*Config, error) {
 		Listen:        ":9435",
 		PollInterval:  1 * time.Second,
 		InstantWindow: 10 * time.Second,
-		EMA: EMAConfig{
-			HalfLife: 5 * time.Minute,
-		},
+		EMAHalfLife:   5 * time.Minute,
 	}
 
 	if err := yaml.Unmarshal(data, cfg); err != nil {
@@ -88,58 +66,34 @@ func (c *Config) Validate() error {
 	if c.SourceZone == "" {
 		return fmt.Errorf("source_zone is required")
 	}
-	if len(c.Interfaces.Wireguard) == 0 && len(c.Interfaces.L2) == 0 {
-		return fmt.Errorf("at least one wireguard or l2 interface is required")
-	}
 	if len(c.Zones) == 0 {
 		return fmt.Errorf("zones map is required")
-	}
-	if len(c.Targets) == 0 {
-		return fmt.Errorf("at least one target is required")
 	}
 
 	if _, ok := c.Zones[c.SourceZone]; !ok {
 		return fmt.Errorf("source_zone %q must exist in zones", c.SourceZone)
 	}
 
-	for name, zone := range c.Zones {
-		if zone.ID == 0 {
-			return fmt.Errorf("zone %q: id must be non-zero", name)
+	remoteZones := 0
+	for name, subnets := range c.Zones {
+		if len(subnets) == 0 {
+			return fmt.Errorf("zone %q: at least one subnet required", name)
 		}
-		if len(zone.Subnets) == 0 {
-			return fmt.Errorf("zone %q: subnets required", name)
-		}
-		for _, s := range zone.Subnets {
+		for _, s := range subnets {
 			if _, _, err := net.ParseCIDR(s); err != nil {
 				return fmt.Errorf("zone %q: invalid subnet %q: %w", name, s, err)
 			}
 		}
+		if name != c.SourceZone {
+			remoteZones++
+		}
+	}
+	if remoteZones == 0 {
+		return fmt.Errorf("at least one remote zone (other than source_zone) is required")
 	}
 
-	ids := map[uint8]string{}
-	for name, zone := range c.Zones {
-		if other, exists := ids[zone.ID]; exists {
-			return fmt.Errorf("duplicate zone id %d for zones %q and %q", zone.ID, other, name)
-		}
-		ids[zone.ID] = name
-	}
-
-	for i, t := range c.Targets {
-		if t.Name == "" {
-			return fmt.Errorf("target[%d]: name is required", i)
-		}
-		if t.DstZone == "" {
-			return fmt.Errorf("target %q: dst_zone is required", t.Name)
-		}
-		if t.Path != "wireguard" && t.Path != "l2" {
-			return fmt.Errorf("target %q: path must be wireguard or l2", t.Name)
-		}
-		if _, ok := c.Zones[t.DstZone]; !ok {
-			return fmt.Errorf("target %q: unknown dst_zone %q", t.Name, t.DstZone)
-		}
-		if t.DstZone == c.SourceZone {
-			return fmt.Errorf("target %q: dst_zone cannot equal source_zone", t.Name)
-		}
+	if err := c.assignZoneIDs(); err != nil {
+		return err
 	}
 
 	if c.PollInterval <= 0 {
@@ -148,31 +102,56 @@ func (c *Config) Validate() error {
 	if c.InstantWindow < 0 {
 		return fmt.Errorf("instant_window must not be negative")
 	}
-	if c.EMA.HalfLife <= 0 && c.EMA.Alpha == nil {
-		return fmt.Errorf("ema.half_life must be positive when alpha is not set")
-	}
-	if c.EMA.Alpha != nil && (*c.EMA.Alpha <= 0 || *c.EMA.Alpha > 1) {
-		return fmt.Errorf("ema.alpha must be in (0, 1]")
+	if c.EMAHalfLife <= 0 {
+		return fmt.Errorf("ema_half_life must be positive")
 	}
 
 	return nil
 }
 
+func (c *Config) assignZoneIDs() error {
+	names := make([]string, 0, len(c.Zones))
+	for name := range c.Zones {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	if len(names) > 255 {
+		return fmt.Errorf("too many zones: %d (max 255)", len(names))
+	}
+
+	c.zoneIDs = make(map[string]uint8, len(names))
+	for i, name := range names {
+		c.zoneIDs[name] = uint8(i + 1)
+	}
+	return nil
+}
+
+func (c *Config) ZoneID(name string) (uint8, bool) {
+	id, ok := c.zoneIDs[name]
+	return id, ok
+}
+
 // SourceZoneLPMEntries returns LPM trie entries for the configured source zone.
 func (c *Config) SourceZoneLPMEntries() ([]ZoneEntry, error) {
-	zone, ok := c.Zones[c.SourceZone]
+	subnets, ok := c.Zones[c.SourceZone]
 	if !ok {
 		return nil, fmt.Errorf("source_zone %q not found in zones", c.SourceZone)
 	}
 
+	zoneID, ok := c.ZoneID(c.SourceZone)
+	if !ok {
+		return nil, fmt.Errorf("source_zone %q has no assigned id", c.SourceZone)
+	}
+
 	var entries []ZoneEntry
-	for _, s := range zone.Subnets {
+	for _, s := range subnets {
 		_, n, err := net.ParseCIDR(s)
 		if err != nil {
 			return nil, fmt.Errorf("zone %q subnet %q: %w", c.SourceZone, s, err)
 		}
 		entries = append(entries, ZoneEntry{
-			ZoneID: zone.ID,
+			ZoneID: zoneID,
 			Prefix: *n,
 		})
 	}
@@ -183,17 +162,21 @@ func (c *Config) SourceZoneLPMEntries() ([]ZoneEntry, error) {
 func (c *Config) ZoneLPMEntries() ([]ZoneEntry, error) {
 	var entries []ZoneEntry
 
-	for name, zone := range c.Zones {
+	for name, subnets := range c.Zones {
 		if name == c.SourceZone {
 			continue
 		}
-		for _, s := range zone.Subnets {
+		zoneID, ok := c.ZoneID(name)
+		if !ok {
+			return nil, fmt.Errorf("zone %q has no assigned id", name)
+		}
+		for _, s := range subnets {
 			_, n, err := net.ParseCIDR(s)
 			if err != nil {
 				return nil, fmt.Errorf("zone %q subnet %q: %w", name, s, err)
 			}
 			entries = append(entries, ZoneEntry{
-				ZoneID: zone.ID,
+				ZoneID: zoneID,
 				Prefix: *n,
 			})
 		}
@@ -202,28 +185,30 @@ func (c *Config) ZoneLPMEntries() ([]ZoneEntry, error) {
 	return entries, nil
 }
 
-func (c *Config) InterfaceNames() []string {
-	names := append([]string{}, c.Interfaces.Wireguard...)
-	names = append(names, c.Interfaces.L2...)
-	return names
-}
-
-func (c *Config) PathForInterface(name string) (string, bool) {
-	for _, n := range c.Interfaces.Wireguard {
-		if n == name {
-			return "wireguard", true
+// RemoteZones returns one entry per remote zone for metrics and BPF classification.
+func (c *Config) RemoteZones() []ResolvedZone {
+	names := make([]string, 0, len(c.Zones))
+	for name := range c.Zones {
+		if name != c.SourceZone {
+			names = append(names, name)
 		}
 	}
-	for _, n := range c.Interfaces.L2 {
-		if n == name {
-			return "l2", true
-		}
+	sort.Strings(names)
+
+	zones := make([]ResolvedZone, 0, len(names))
+	for _, name := range names {
+		id, _ := c.ZoneID(name)
+		zones = append(zones, ResolvedZone{
+			DstZone:    name,
+			ZoneID:     id,
+			SourceZone: c.SourceZone,
+		})
 	}
-	return "", false
+	return zones
 }
 
-func (c *Config) ShouldIgnore(name string) bool {
-	for _, pattern := range c.Interfaces.Ignore {
+func ShouldIgnore(name string, patterns []string) bool {
+	for _, pattern := range patterns {
 		if pattern == name {
 			return true
 		}
@@ -237,53 +222,11 @@ func (c *Config) ShouldIgnore(name string) bool {
 	return false
 }
 
-func (c *Config) ResolveTargets(ifIndexByName map[string]int) ([]ResolvedTarget, error) {
-	var resolved []ResolvedTarget
-
-	for _, t := range c.Targets {
-		var ifNames []string
-		switch t.Path {
-		case "wireguard":
-			ifNames = c.Interfaces.Wireguard
-		case "l2":
-			ifNames = c.Interfaces.L2
-		}
-		if len(ifNames) == 0 {
-			return nil, fmt.Errorf("target %q: no interfaces configured for path %q", t.Name, t.Path)
-		}
-
-		zone, ok := c.Zones[t.DstZone]
-		if !ok {
-			return nil, fmt.Errorf("target %q: unknown zone %q", t.Name, t.DstZone)
-		}
-
-		// Use first interface for the path; counters aggregate per (ifindex, zone_id).
-		ifIdx, ok := ifIndexByName[ifNames[0]]
-		if !ok {
-			return nil, fmt.Errorf("target %q: interface %q not found", t.Name, ifNames[0])
-		}
-
-		resolved = append(resolved, ResolvedTarget{
-			Name:       t.Name,
-			DstZone:    t.DstZone,
-			Path:       t.Path,
-			ZoneID:     zone.ID,
-			IfIndex:    ifIdx,
-			SourceZone: c.SourceZone,
-		})
-	}
-
-	return resolved, nil
-}
-
 func (c *Config) Alpha(dt time.Duration) float64 {
-	if c.EMA.Alpha != nil {
-		return *c.EMA.Alpha
-	}
-	if c.EMA.HalfLife <= 0 {
+	if c.EMAHalfLife <= 0 {
 		return 0.3
 	}
-	return 1 - expNeg(dt.Seconds()/c.EMA.HalfLife.Seconds())
+	return 1 - expNeg(dt.Seconds()/c.EMAHalfLife.Seconds())
 }
 
 // expNeg computes e^(-x) via series for small values; sufficient for EMA alpha.
@@ -291,6 +234,5 @@ func expNeg(x float64) float64 {
 	if x <= 0 {
 		return 1
 	}
-	// Use math.Exp would be cleaner but keep import minimal - actually use math
 	return mathExpNeg(x)
 }

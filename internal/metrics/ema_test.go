@@ -7,57 +7,70 @@ import (
 	"github.com/ehealth-id/ebpf-packet-loss-exporter/internal/config"
 )
 
+func zoneByDst(states []ZoneState, dstZone string) (ZoneState, bool) {
+	for _, st := range states {
+		if st.DstZone == dstZone {
+			return st, true
+		}
+	}
+	return ZoneState{}, false
+}
+
+func testZones() []config.ResolvedZone {
+	return []config.ResolvedZone{{
+		DstZone:    "f",
+		ZoneID:     4,
+		SourceZone: "e",
+	}}
+}
+
 func TestEMAUpdateAndHold(t *testing.T) {
 	cfg := &config.Config{
 		PollInterval: 15 * time.Second,
-		EMA: config.EMAConfig{
-			HalfLife: 5 * time.Minute,
-		},
+		EMAHalfLife: 5 * time.Minute,
 	}
-	targets := []config.ResolvedTarget{{
-		Name:       "f-ehealth-id-l2",
-		DstZone:    "f",
-		Path:       "l2",
-		ZoneID:     4,
-		IfIndex:    22,
-		SourceZone: "e",
-	}}
-	store := NewEMAStore(cfg, targets)
+	store := NewEMAStore(cfg, testZones())
 	now := time.Now()
 
 	store.Update(now, map[string]CounterSnapshot{
-		"f-ehealth-id-l2": {Segments: 100, Retrans: 10},
+		"f": {Segments: 100, Retrans: 10},
 	})
 	snap := store.Snapshot()
 	if len(snap) != 1 {
 		t.Fatalf("expected 1 snapshot, got %d", len(snap))
 	}
-	if snap[0].InstantPercent != 10.0 {
-		t.Fatalf("instant = %f, want 10", snap[0].InstantPercent)
+	st, ok := zoneByDst(snap, "f")
+	if !ok {
+		t.Fatal("zone f not found")
 	}
-	if snap[0].EMAPercent != 10.0 {
-		t.Fatalf("ema = %f, want 10 on first sample", snap[0].EMAPercent)
+	if st.InstantPercent != 10.0 {
+		t.Fatalf("instant = %f, want 10", st.InstantPercent)
+	}
+	if st.EMAPercent != 10.0 {
+		t.Fatalf("ema = %f, want 10 on first sample", st.EMAPercent)
 	}
 
 	// No new segments: hold EMA.
 	store.Update(now.Add(15*time.Second), map[string]CounterSnapshot{
-		"f-ehealth-id-l2": {Segments: 100, Retrans: 10},
+		"f": {Segments: 0, Retrans: 0},
 	})
 	snap = store.Snapshot()
-	if snap[0].EMAPercent != 10.0 {
-		t.Fatalf("ema should hold at 10, got %f", snap[0].EMAPercent)
+	st, _ = zoneByDst(snap, "f")
+	if st.EMAPercent != 10.0 {
+		t.Fatalf("ema should hold at 10, got %f", st.EMAPercent)
 	}
 
 	// More traffic with 20% loss.
 	store.Update(now.Add(30*time.Second), map[string]CounterSnapshot{
-		"f-ehealth-id-l2": {Segments: 200, Retrans: 30},
+		"f": {Segments: 100, Retrans: 20},
 	})
 	snap = store.Snapshot()
-	if snap[0].InstantPercent != 20.0 {
-		t.Fatalf("instant = %f, want 20", snap[0].InstantPercent)
+	st, _ = zoneByDst(snap, "f")
+	if st.InstantPercent != 20.0 {
+		t.Fatalf("instant = %f, want 20", st.InstantPercent)
 	}
-	if snap[0].EMAPercent <= 10.0 || snap[0].EMAPercent >= 20.0 {
-		t.Fatalf("ema should be between 10 and 20, got %f", snap[0].EMAPercent)
+	if st.EMAPercent <= 10.0 || st.EMAPercent >= 20.0 {
+		t.Fatalf("ema should be between 10 and 20, got %f", st.EMAPercent)
 	}
 }
 
@@ -72,55 +85,46 @@ func TestInstantPercentSlidingWindow(t *testing.T) {
 	cfg := &config.Config{
 		PollInterval:  1 * time.Second,
 		InstantWindow: 3 * time.Second,
-		EMA: config.EMAConfig{
-			HalfLife: 5 * time.Minute,
-		},
+		EMAHalfLife: 5 * time.Minute,
 	}
-	targets := []config.ResolvedTarget{{
-		Name:       "f-ehealth-id-wireguard",
-		DstZone:    "f",
-		Path:       "wireguard",
-		ZoneID:     4,
-		IfIndex:    11,
-		SourceZone: "e",
-	}}
-	store := NewEMAStore(cfg, targets)
+	store := NewEMAStore(cfg, testZones())
 	now := time.Now()
 
-	// Window: 10 seg / 1 ret = 10%
 	store.Update(now, map[string]CounterSnapshot{
-		"f-ehealth-id-wireguard": {Segments: 10, Retrans: 1},
+		"f": {Segments: 10, Retrans: 1},
 	})
 	snap := store.Snapshot()
-	if snap[0].InstantPercent != 10.0 {
-		t.Fatalf("instant = %f, want 10", snap[0].InstantPercent)
+	st, _ := zoneByDst(snap, "f")
+	if st.InstantPercent != 10.0 {
+		t.Fatalf("instant = %f, want 10", st.InstantPercent)
 	}
 
-	// Window: 20 seg / 1 ret = 5%
 	store.Update(now.Add(1*time.Second), map[string]CounterSnapshot{
-		"f-ehealth-id-wireguard": {Segments: 20, Retrans: 1},
+		"f": {Segments: 10, Retrans: 0},
 	})
 	snap = store.Snapshot()
-	if snap[0].InstantPercent != 5.0 {
-		t.Fatalf("instant = %f, want 5", snap[0].InstantPercent)
+	st, _ = zoneByDst(snap, "f")
+	if st.InstantPercent != 5.0 {
+		t.Fatalf("instant = %f, want 5", st.InstantPercent)
 	}
 
-	// Window: 30 seg / 3 ret = 10%
 	store.Update(now.Add(2*time.Second), map[string]CounterSnapshot{
-		"f-ehealth-id-wireguard": {Segments: 30, Retrans: 3},
+		"f": {Segments: 10, Retrans: 2},
 	})
 	snap = store.Snapshot()
-	if snap[0].InstantPercent != 10.0 {
-		t.Fatalf("instant = %f, want 10", snap[0].InstantPercent)
+	st, _ = zoneByDst(snap, "f")
+	if st.InstantPercent != 10.0 {
+		t.Fatalf("instant = %f, want 10", st.InstantPercent)
 	}
 
 	// Evict first sample (10/1); window: 10/0 + 10/2 + 10/0 = 30 seg / 2 ret
 	store.Update(now.Add(3*time.Second), map[string]CounterSnapshot{
-		"f-ehealth-id-wireguard": {Segments: 40, Retrans: 3},
+		"f": {Segments: 10, Retrans: 0},
 	})
 	snap = store.Snapshot()
+	st, _ = zoneByDst(snap, "f")
 	want := 100.0 * 2.0 / 30.0
-	if snap[0].InstantPercent != want {
-		t.Fatalf("instant = %f, want %f", snap[0].InstantPercent, want)
+	if st.InstantPercent != want {
+		t.Fatalf("instant = %f, want %f", st.InstantPercent, want)
 	}
 }
