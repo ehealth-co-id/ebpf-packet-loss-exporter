@@ -16,6 +16,8 @@ type Exporter struct {
 	segmentsTotal *prometheus.CounterVec
 	retransTotal  *prometheus.CounterVec
 	emaTimestamp  *prometheus.GaugeVec
+	debugTCPPayload prometheus.Gauge
+	debugTCPZoned   prometheus.Gauge
 
 	mu          sync.RWMutex
 	lastSeg     map[string]uint64
@@ -43,12 +45,20 @@ func NewExporter() *Exporter {
 		}, []string{"name", "source_zone", "path", "dst_zone"}),
 		retransTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "ebpf_packet_loss_retrans_total",
-			Help: "Total TCP retransmits observed by BPF (debug).",
+			Help: "Approximate TCP retransmits observed by BPF Bloom filter (debug).",
 		}, []string{"name", "source_zone", "path", "dst_zone"}),
 		emaTimestamp: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "ebpf_packet_loss_ema_last_update_timestamp",
 			Help: "Unix timestamp of the last EMA update per target.",
 		}, []string{"name", "source_zone", "path", "dst_zone"}),
+		debugTCPPayload: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "ebpf_packet_loss_debug_tcp_payload_total",
+			Help: "TCP packets with payload or control flags seen on monitored interfaces (before zone filter).",
+		}),
+		debugTCPZoned: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "ebpf_packet_loss_debug_tcp_zoned_total",
+			Help: "TCP packets matching both source_zone and remote dst_zone subnets.",
+		}),
 	}
 
 	reg.MustRegister(
@@ -57,6 +67,8 @@ func NewExporter() *Exporter {
 		e.segmentsTotal,
 		e.retransTotal,
 		e.emaTimestamp,
+		e.debugTCPPayload,
+		e.debugTCPZoned,
 	)
 
 	return e
@@ -124,4 +136,9 @@ func (e *Exporter) Publish(states []TargetState) {
 			e.emaTimestamp.With(labels).Set(float64(st.LastUpdate.Unix()))
 		}
 	}
+}
+
+func (e *Exporter) PublishDebug(tcpPayload, tcpZoned uint64) {
+	e.debugTCPPayload.Set(float64(tcpPayload))
+	e.debugTCPZoned.Set(float64(tcpZoned))
 }

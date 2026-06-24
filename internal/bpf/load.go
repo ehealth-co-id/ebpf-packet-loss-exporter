@@ -29,18 +29,32 @@ type linkCloser interface {
 	Close() error
 }
 
-func Load(entries []config.ZoneEntry) (*Collection, error) {
+type DebugCounters struct {
+	TCPPackets uint64
+	TCPZoned   uint64
+}
+
+func Load(dstEntries, srcEntries []config.ZoneEntry) (*Collection, error) {
 	objs := &PacketLossObjects{}
 	if err := LoadPacketLossObjects(objs, nil); err != nil {
 		return nil, fmt.Errorf("load bpf objects: %w", err)
 	}
 
-	for _, e := range entries {
+	for _, e := range dstEntries {
 		key := lpmKeyFromNet(e.Prefix)
 		zoneID := e.ZoneID
 		if err := objs.ZoneLpm.Put(key, zoneID); err != nil {
 			_ = objs.Close()
-			return nil, fmt.Errorf("populate zone_lpm: %w", err)
+			return nil, fmt.Errorf("populate zone_lpm %s: %w", e.Prefix.String(), err)
+		}
+	}
+
+	for _, e := range srcEntries {
+		key := lpmKeyFromNet(e.Prefix)
+		zoneID := e.ZoneID
+		if err := objs.SrcZoneLpm.Put(key, zoneID); err != nil {
+			_ = objs.Close()
+			return nil, fmt.Errorf("populate src_zone_lpm %s: %w", e.Prefix.String(), err)
 		}
 	}
 
@@ -61,16 +75,26 @@ func (c *Collection) ReadCounters(target config.ResolvedTarget) (segments, retra
 		DstZoneID: target.ZoneID,
 	}
 
-	segVals, err := c.objs.TcpSegments.LookupBytes(key)
+	segments, err = sumPerCPU(c.objs.TcpSegments, key)
 	if err != nil {
 		return 0, 0, nil
 	}
-	retVals, err := c.objs.TcpRetrans.LookupBytes(key)
+	retrans, err = sumPerCPU(c.objs.TcpRetrans, key)
 	if err != nil {
-		return sumUint64Slice(segVals), 0, nil
+		return segments, 0, nil
 	}
+	return segments, retrans, nil
+}
 
-	return sumUint64Slice(segVals), sumUint64Slice(retVals), nil
+func (c *Collection) ReadDebugCounters() (DebugCounters, error) {
+	var out DebugCounters
+	var err error
+	out.TCPPackets, err = sumPerCPUArray(c.objs.DebugTcpPayload)
+	if err != nil {
+		return out, err
+	}
+	out.TCPZoned, err = sumPerCPUArray(c.objs.DebugTcpZoned)
+	return out, err
 }
 
 func (c *Collection) Close() error {
@@ -98,16 +122,21 @@ func lpmKeyFromNet(n net.IPNet) zoneLpmKey {
 	}
 }
 
-func sumUint64Slice(vals []byte) uint64 {
-	if len(vals) == 0 {
-		return 0
+func sumPerCPU(m *ebpf.Map, key interface{}) (uint64, error) {
+	var perCPU []uint64
+	if err := m.Lookup(key, &perCPU); err != nil {
+		return 0, err
 	}
-	const u64 = 8
 	var total uint64
-	for i := 0; i+u64 <= len(vals); i += u64 {
-		total += binary.LittleEndian.Uint64(vals[i : i+u64])
+	for _, v := range perCPU {
+		total += v
 	}
-	return total
+	return total, nil
+}
+
+func sumPerCPUArray(m *ebpf.Map) (uint64, error) {
+	var key uint32
+	return sumPerCPU(m, key)
 }
 
 // ReadAllCounterKeys aggregates every BPF counter entry for debugging.
@@ -115,9 +144,13 @@ func (c *Collection) ReadAllCounterKeys() (map[counterKey]uint64, error) {
 	out := make(map[counterKey]uint64)
 	iter := c.objs.TcpSegments.Iterate()
 	var key counterKey
-	var vals []byte
+	var vals []uint64
 	for iter.Next(&key, &vals) {
-		out[key] = sumUint64Slice(vals)
+		var total uint64
+		for _, v := range vals {
+			total += v
+		}
+		out[key] = total
 	}
 	if err := iter.Err(); err != nil {
 		return nil, err

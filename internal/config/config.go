@@ -153,6 +153,27 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// SourceZoneLPMEntries returns LPM trie entries for the configured source zone.
+func (c *Config) SourceZoneLPMEntries() ([]ZoneEntry, error) {
+	zone, ok := c.Zones[c.SourceZone]
+	if !ok {
+		return nil, fmt.Errorf("source_zone %q not found in zones", c.SourceZone)
+	}
+
+	var entries []ZoneEntry
+	for _, s := range zone.Subnets {
+		_, n, err := net.ParseCIDR(s)
+		if err != nil {
+			return nil, fmt.Errorf("zone %q subnet %q: %w", c.SourceZone, s, err)
+		}
+		entries = append(entries, ZoneEntry{
+			ZoneID: zone.ID,
+			Prefix: *n,
+		})
+	}
+	return entries, nil
+}
+
 // ZoneLPMEntries returns LPM trie entries for remote zones (excludes source zone subnets).
 func (c *Config) ZoneLPMEntries() ([]ZoneEntry, error) {
 	var entries []ZoneEntry

@@ -10,7 +10,18 @@ Passive eBPF TCP retransmit monitoring for **wireguard** and **l2** inter-zone p
 | `l2` | ebpf-packet-loss-exporter | Passive TCP retransmit ratio | `:9435` |
 | `direct` | network_exporter (unchanged) | Active ICMP | `:9427` |
 
-TC egress attaches only on configured wireguard and l2 interfaces. No WAN attachment, no ICMP parsing.
+TC egress attaches only on configured wireguard and l2 interfaces on the **transit gateway**. No WAN attachment, no ICMP parsing.
+
+## Gateway deployment
+
+This exporter runs on the **transit gateway** that forwards inter-zone traffic (WireGuard mesh, L2 links). It does **not** run on application hosts.
+
+- **Hook**: TC egress on configured path interfaces (`wg0`, `ens21`, …). Kernel `tcp_retransmit_skb` tracepoints are not used because they only fire for sockets owned by the local TCP stack, not forwarded transit traffic.
+- **Signal**: approximate transit-path TCP retransmit ratio from `source_zone` to each `dst_zone`, keyed by egress `ifindex` (separates `wireguard` vs `l2` targets).
+- **Classification**: both `saddr ∈ source_zone` subnets and `daddr ∈ remote zone` subnets must match before a packet is counted.
+- **Retransmit detection**: epoch Bloom filter (5-minute window, ~32 KB/CPU fixed memory). Duplicate `(4-tuple, seq)` within an epoch is treated as a probable retransmit. Segment counting stays exact.
+
+Metrics are only meaningful when TC attaches exclusively to transit path interfaces listed in config. The exporter cannot verify routing policy beyond subnet filters.
 
 ## Build
 
@@ -75,9 +86,9 @@ When deploying, **trim** wg/l2 targets from `network_exporter.yml`; keep `*-dire
 | Metric | Type | Description |
 |---|---|---|
 | `ebpf_packet_loss_percent` | Gauge | Instant loss from last poll window |
-| `ebpf_packet_loss_percent_ema` | Gauge | EMA-smoothed loss (primary for dashboards) |
-| `ebpf_packet_loss_segments_total` | Counter | Raw BPF segments (debug) |
-| `ebpf_packet_loss_retrans_total` | Counter | Raw BPF retrans (debug) |
+| `ebpf_packet_loss_percent_ema` | Gauge | EMA-smoothed approximate loss (primary for dashboards) |
+| `ebpf_packet_loss_segments_total` | Counter | Raw BPF segments, exact (debug) |
+| `ebpf_packet_loss_retrans_total` | Counter | Raw BPF retransmits, approximate (debug) |
 | `ebpf_packet_loss_ema_last_update_timestamp` | Gauge | Unix time of last EMA update |
 
 Labels: `name`, `source_zone`, `path`, `dst_zone`
@@ -106,6 +117,27 @@ Staleness alert:
 time() - ebpf_packet_loss_ema_last_update_timestamp > 300
 ```
 
+### Troubleshooting zero metrics
+
+This exporter is **passive** — it only observes real TCP traffic on monitored interfaces. Adding `tc netem loss` alone does not create metrics; you need active TCP flows between zone subnets (e.g. `iperf3`, `ssh`, Ceph/PG traffic).
+
+**WireGuard (`wg0`) uses L3 skbs** (no Ethernet header). The BPF program handles both L2 and L3 packet layouts.
+
+Check debug gauges after generating traffic:
+
+```promql
+ebpf_packet_loss_debug_tcp_payload_total   # TCP on monitored interfaces (before zone filter)?
+ebpf_packet_loss_debug_tcp_zoned_total     # matched source_zone + remote dst_zone?
+```
+
+| debug_tcp_payload | debug_tcp_zoned | Likely cause |
+|---|---|---|
+| 0 | 0 | No TCP traffic on monitored egress, or hook not firing |
+| >0 | 0 | Source or destination IPs don't match configured zone subnets |
+| >0 | >0 | Counters should increment; check `ebpf_packet_loss_segments_total` |
+
+Zone subnets must match **source and destination IPs** seen on the wire (e.g. `192.168.3.0/24` for zone `e`), not WireGuard peer endpoint addresses.
+
 EMA updates on an internal poll loop (`poll_interval`, default 15s) independent of Prometheus scrapes. During scrape gaps the exporter keeps observing traffic; when scrapes resume the EMA gauge reflects the outage window.
 
 ## Install
@@ -130,8 +162,13 @@ curl -s localhost:9435/metrics | grep ebpf_packet_loss_percent_ema
 
 ## Limitations
 
-- wireguard + l2 only; direct stays on network_exporter
-- Passive TCP — requires real production traffic
+- Gateway transit paths only (wireguard + l2); direct stays on network_exporter
+- Passive TCP — requires real production traffic between configured zones
+- **Approximate retransmits**: Bloom filter with ~1% false-positive bias at typical load (conservative — over-counts retrans slightly); not suitable for audit-grade per-flow counts
+- Bloom epoch resets every 5 minutes; seq reuse within an epoch on long-lived flows can cause spurious duplicates
+- Fixed ~32 KB/CPU Bloom bitmap regardless of flow count
 - Quiet paths: EMA holds last value; instant may be 0
 - TCP IPv4 only
 - TCX egress on kernel 6.6+; clsact TC egress fallback on older kernels
+- Egress TC may observe pre-GSO skbs; `seq >> 4` bucketing tolerates minor segmentation variance
+- Path congestion proxy, not a byte-for-byte wire duplicate counter

@@ -60,10 +60,14 @@ type PacketLossProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type PacketLossMapSpecs struct {
-	SeenSeq     *ebpf.MapSpec `ebpf:"seen_seq"`
-	TcpRetrans  *ebpf.MapSpec `ebpf:"tcp_retrans"`
-	TcpSegments *ebpf.MapSpec `ebpf:"tcp_segments"`
-	ZoneLpm     *ebpf.MapSpec `ebpf:"zone_lpm"`
+	BloomBits       *ebpf.MapSpec `ebpf:"bloom_bits"`
+	BloomEpoch      *ebpf.MapSpec `ebpf:"bloom_epoch"`
+	DebugTcpPayload *ebpf.MapSpec `ebpf:"debug_tcp_payload"`
+	DebugTcpZoned   *ebpf.MapSpec `ebpf:"debug_tcp_zoned"`
+	SrcZoneLpm      *ebpf.MapSpec `ebpf:"src_zone_lpm"`
+	TcpRetrans      *ebpf.MapSpec `ebpf:"tcp_retrans"`
+	TcpSegments     *ebpf.MapSpec `ebpf:"tcp_segments"`
+	ZoneLpm         *ebpf.MapSpec `ebpf:"zone_lpm"`
 }
 
 // PacketLossObjects contains all objects after they have been loaded into the kernel.
@@ -85,15 +89,23 @@ func (o *PacketLossObjects) Close() error {
 //
 // It can be passed to LoadPacketLossObjects or ebpf.CollectionSpec.LoadAndAssign.
 type PacketLossMaps struct {
-	SeenSeq     *ebpf.Map `ebpf:"seen_seq"`
-	TcpRetrans  *ebpf.Map `ebpf:"tcp_retrans"`
-	TcpSegments *ebpf.Map `ebpf:"tcp_segments"`
-	ZoneLpm     *ebpf.Map `ebpf:"zone_lpm"`
+	BloomBits       *ebpf.Map `ebpf:"bloom_bits"`
+	BloomEpoch      *ebpf.Map `ebpf:"bloom_epoch"`
+	DebugTcpPayload *ebpf.Map `ebpf:"debug_tcp_payload"`
+	DebugTcpZoned   *ebpf.Map `ebpf:"debug_tcp_zoned"`
+	SrcZoneLpm      *ebpf.Map `ebpf:"src_zone_lpm"`
+	TcpRetrans      *ebpf.Map `ebpf:"tcp_retrans"`
+	TcpSegments     *ebpf.Map `ebpf:"tcp_segments"`
+	ZoneLpm         *ebpf.Map `ebpf:"zone_lpm"`
 }
 
 func (m *PacketLossMaps) Close() error {
 	return _PacketLossClose(
-		m.SeenSeq,
+		m.BloomBits,
+		m.BloomEpoch,
+		m.DebugTcpPayload,
+		m.DebugTcpZoned,
+		m.SrcZoneLpm,
 		m.TcpRetrans,
 		m.TcpSegments,
 		m.ZoneLpm,

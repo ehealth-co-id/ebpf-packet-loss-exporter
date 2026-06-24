@@ -37,7 +37,12 @@ func main() {
 		log.Fatalf("zone entries: %v", err)
 	}
 
-	coll, err := bpf.Load(zoneEntries)
+	srcZoneEntries, err := cfg.SourceZoneLPMEntries()
+	if err != nil {
+		log.Fatalf("source zone entries: %v", err)
+	}
+
+	coll, err := bpf.Load(zoneEntries, srcZoneEntries)
 	if err != nil {
 		log.Fatalf("bpf load: %v", err)
 	}
@@ -65,6 +70,11 @@ func main() {
 	}()
 
 	log.Printf("attached TC egress on %v", ifaceNames)
+	log.Printf("metrics reflect transit TCP from source_zone=%q to remote zones; attach only on listed path interfaces", cfg.SourceZone)
+	for _, t := range targets {
+		log.Printf("target %s: ifindex=%d zone_id=%d path=%s dst_zone=%s",
+			t.Name, t.IfIndex, t.ZoneID, t.Path, t.DstZone)
+	}
 
 	ema := metrics.NewEMAStore(cfg, targets)
 	prom := metrics.NewExporter()
@@ -105,6 +115,9 @@ func main() {
 		}
 		ema.Update(time.Now(), counters)
 		prom.Publish(ema.Snapshot())
+		if dbg, err := coll.ReadDebugCounters(); err == nil {
+			prom.PublishDebug(dbg.TCPPackets, dbg.TCPZoned)
+		}
 	}
 
 	poll()
@@ -126,13 +139,16 @@ func resolveInterfaces(cfg *config.Config) (map[string]int, error) {
 	out := make(map[string]int)
 	for _, name := range cfg.InterfaceNames() {
 		if cfg.ShouldIgnore(name) {
-			continue
+			return nil, fmt.Errorf("interface %q is configured for monitoring and listed in ignore", name)
 		}
 		iface, err := net.InterfaceByName(name)
 		if err != nil {
 			return nil, fmt.Errorf("lookup %q: %w", name, err)
 		}
 		out[name] = iface.Index
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no transit interfaces configured")
 	}
 	return out, nil
 }

@@ -70,6 +70,14 @@ func TestLoadAndValidate(t *testing.T) {
 		t.Fatalf("expected 4 remote zone entries, got %d", len(entries))
 	}
 
+	srcEntries, err := cfg.SourceZoneLPMEntries()
+	if err != nil {
+		t.Fatalf("SourceZoneLPMEntries: %v", err)
+	}
+	if len(srcEntries) != 2 {
+		t.Fatalf("expected 2 source zone entries, got %d", len(srcEntries))
+	}
+
 	alpha := cfg.Alpha(15 * time.Second)
 	if alpha <= 0 || alpha >= 1 {
 		t.Fatalf("alpha out of range: %f", alpha)

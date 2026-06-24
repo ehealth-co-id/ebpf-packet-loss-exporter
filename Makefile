@@ -30,4 +30,4 @@ GOOS ?= linux
 GOARCH ?= amd64
 
 cross:
-	GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=0 $(MAKE) build
+	GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=0 go build -o $(BINARY) $(CMD)
