@@ -164,9 +164,10 @@ curl -s localhost:9435/metrics | grep ebpf_packet_loss_percent_ema
 
 - Gateway transit paths only (wireguard + l2); direct stays on network_exporter
 - Passive TCP — requires real production traffic between configured zones
-- **Approximate retransmits**: Bloom filter with ~1% false-positive bias at typical load (conservative — over-counts retrans slightly); not suitable for audit-grade per-flow counts
-- Bloom epoch resets every 5 minutes; seq reuse within an epoch on long-lived flows can cause spurious duplicates
-- Fixed ~32 KB/CPU Bloom bitmap regardless of flow count
+- **Approximate retransmits**: global Bloom filter (~1 MB fixed) with ~1% false-positive bias at typical load (conservative — over-counts retrans slightly); not suitable for audit-grade per-flow counts
+- Bloom epoch rolls every 1.5 seconds; seq reuse across epochs on long-lived flows can cause spurious duplicates
+- Global Bloom bitmap shared across CPUs; cross-core atomic contention at very high PPS — hash-to-slot sharding is the scale-up path if profiling shows a bottleneck
+- Fixed ~1 MB global Bloom bitmap regardless of flow count
 - Quiet paths: EMA holds last value; instant may be 0
 - TCP IPv4 only
 - TCX egress on kernel 6.6+; clsact TC egress fallback on older kernels

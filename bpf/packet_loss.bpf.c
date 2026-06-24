@@ -51,14 +51,14 @@ struct {
 } src_zone_lpm SEC(".maps");
 
 struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, 2 * BLOOM_WORDS);
 	__uint(key_size, sizeof(__u32));
 	__uint(value_size, sizeof(struct bloom_word));
 } bloom_bits SEC(".maps");
 
 struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, 1);
 	__uint(key_size, sizeof(__u32));
 	__uint(value_size, sizeof(struct bloom_epoch_state));
@@ -155,10 +155,12 @@ static __always_inline void bloom_set_bit_gen(__u32 bit, __u64 gen)
 		return;
 
 	if (w->gen != gen) {
-		w->gen = gen;
-		w->bits = 0;
+		__u64 old = __sync_val_compare_and_swap(&w->gen, w->gen, gen);
+
+		if (old != gen)
+			w->bits = 0;
 	}
-	w->bits |= mask;
+	__sync_fetch_and_or(&w->bits, mask);
 }
 
 static __always_inline void bloom_maybe_roll_epoch(__u64 now)
@@ -177,8 +179,8 @@ static __always_inline void bloom_maybe_roll_epoch(__u64 now)
 	}
 
 	if (now > epoch->start_ns && now - epoch->start_ns > BLOOM_EPOCH_NS) {
-		epoch->gen++;
-		epoch->start_ns = now;
+		if (__sync_bool_compare_and_swap(&epoch->start_ns, epoch->start_ns, now))
+			__sync_fetch_and_add(&epoch->gen, 1);
 	}
 }
 
