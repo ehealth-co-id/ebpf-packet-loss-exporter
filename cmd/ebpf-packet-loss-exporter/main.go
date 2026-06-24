@@ -203,8 +203,6 @@ func main() {
 		prom.Publish(ema.Snapshot())
 	}
 
-	publish()
-
 	for {
 		select {
 		case <-ctx.Done():
