@@ -85,6 +85,7 @@ func parseStatsEvent(raw []byte) (bpf.StatsEvent, error) {
 
 func startRingbufReader(ctx context.Context, rd *ringbuf.Reader, zoneByID map[uint8]string, acc *accumulator) {
 	go func() {
+		var unknownZone uint64
 		for {
 			rec, err := rd.Read()
 			if err != nil {
@@ -103,6 +104,11 @@ func startRingbufReader(ctx context.Context, rd *ringbuf.Reader, zoneByID map[ui
 
 			dstZone, ok := zoneByID[evt.DstZoneID]
 			if !ok {
+				unknownZone++
+				if unknownZone == 1 || unknownZone%1000 == 0 {
+					log.Printf("ringbuf: unknown dst_zone_id=%d (ifindex=%d), dropped %d events so far",
+						evt.DstZoneID, evt.IfIndex, unknownZone)
+				}
 				continue
 			}
 			acc.record(dstZone, evt.IsRetrans != 0)
@@ -141,7 +147,7 @@ func main() {
 	}
 	defer coll.Close()
 
-	ifaceNames, err := config.DiscoverTransitInterfaces(cfg.Interfaces.Ignore)
+	ifaceNames, err := cfg.TransitInterfaceNames()
 	if err != nil {
 		log.Fatalf("interfaces: %v", err)
 	}
@@ -158,7 +164,7 @@ func main() {
 		}
 	}()
 
-	log.Printf("attached TC egress on %v (auto-discovered)", ifaceNames)
+	log.Printf("attached TC egress on %v", ifaceNames)
 	log.Printf("metrics reflect transit TCP from source_zone=%q to remote zones", cfg.SourceZone)
 	for _, z := range zones {
 		log.Printf("zone %s: zone_id=%d", z.DstZone, z.ZoneID)
@@ -197,11 +203,39 @@ func main() {
 	ticker := time.NewTicker(cfg.PollInterval)
 	defer ticker.Stop()
 
+	var zeroPolls int
 	publish := func() {
 		counters := acc.snapshotAndReset(zones)
+		var userSegs uint64
+		for dst, c := range counters {
+			userSegs += c.Segments
+			if c.Segments > 0 {
+				log.Printf("poll: zone %s segments=%d retrans=%d", dst, c.Segments, c.Retrans)
+			}
+		}
+		if dbg, err := coll.ReadDebugCounters(); err == nil {
+			if userSegs == 0 && dbg.TCPPackets == 0 {
+				zeroPolls++
+				if zeroPolls == 1 || zeroPolls%60 == 0 {
+					log.Printf("poll: no TCP segments yet (bpf tcp=%d zoned=%d); check interfaces, subnets, and inter-zone traffic",
+						dbg.TCPPackets, dbg.TCPZoned)
+				}
+			} else if userSegs == 0 && dbg.TCPZoned > 0 {
+				log.Printf("poll: bpf zoned=%d but userspace=0; check zone_id mapping (bpf zoned tcp=%d)",
+					dbg.TCPZoned, dbg.TCPPackets)
+			} else if dbg.TCPPackets > 0 && dbg.TCPZoned == 0 {
+				log.Printf("poll: bpf tcp=%d but zoned=0; check source_zone and dst_zone subnets",
+					dbg.TCPPackets)
+			} else {
+				zeroPolls = 0
+			}
+		}
+
 		ema.Update(time.Now(), counters)
 		prom.Publish(ema.Snapshot())
 	}
+
+	publish()
 
 	for {
 		select {

@@ -108,7 +108,7 @@ func lpmKeyFromNet(n net.IPNet) zoneLpmKey {
 	ones, _ := n.Mask.Size()
 	return zoneLpmKey{
 		PrefixLen: uint32(ones),
-		Addr:      binary.BigEndian.Uint32(ip),
+		Addr:      binary.NativeEndian.Uint32(ip),
 	}
 }
 

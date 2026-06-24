@@ -6,7 +6,7 @@ Runs on the **transit gateway** that forwards traffic between zones (WireGuard, 
 
 ## How it works
 
-- Attaches TC egress on auto-discovered WireGuard and Ethernet interfaces (`lo`, `docker0`, `br-*`, `veth*`, etc. are excluded by default).
+- Attaches TC egress on configured transit interfaces (or auto-discovers WireGuard + Ethernet when `interfaces` is omitted).
 - Counts TCP segments between `source_zone` subnets and each remote zone's subnets.
 - Estimates retransmits via a Bloom filter on `(4-tuple, seq)`.
 - Exposes one smoothed loss % per `source_zone` → `dst_zone` pair.
@@ -19,6 +19,7 @@ Path: `/etc/ebpf_packet_loss_exporter/config.yml`
 
 ```yaml
 source_zone: e
+interfaces: [wg0, ens21]
 zones:
   c: [192.168.0.0/24]
   d: [192.168.1.0/24]
@@ -34,12 +35,7 @@ All fields below are optional (defaults shown):
 | `poll_interval` | `1s` | Internal counter poll interval |
 | `instant_window` | `10s` | Rolling window for `ebpf_packet_loss_percent` |
 | `ema_half_life` | `5m` | EMA smoothing half-life |
-| `interfaces.ignore` | built-in list | Extra interface patterns to skip |
-
-```yaml
-interfaces:
-  ignore: [bond0]
-```
+| `interfaces` | auto-discover | TC egress attach list (`wg0`, `ens21`, …) |
 
 Subnet IPs must match what is seen on the wire (zone internal addresses), not WireGuard peer endpoints.
 

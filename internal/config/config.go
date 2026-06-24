@@ -16,15 +16,11 @@ type Config struct {
 	Listen        string              `yaml:"listen"`
 	PollInterval  time.Duration       `yaml:"poll_interval"`
 	InstantWindow time.Duration       `yaml:"instant_window"`
-	Interfaces    Interfaces          `yaml:"interfaces,omitempty"`
+	Interfaces    []string            `yaml:"interfaces,omitempty"`
 	Zones         map[string][]string `yaml:"zones"`
 	EMAHalfLife   time.Duration       `yaml:"ema_half_life"`
 
 	zoneIDs map[string]uint8
-}
-
-type Interfaces struct {
-	Ignore []string `yaml:"ignore,omitempty"`
 }
 
 type ZoneEntry struct {
@@ -54,12 +50,28 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
+	cfg.applyDefaults()
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 
 	return cfg, nil
+}
+
+func (c *Config) applyDefaults() {
+	if c.Listen == "" {
+		c.Listen = ":9435"
+	}
+	if c.PollInterval <= 0 {
+		c.PollInterval = time.Second
+	}
+	if c.InstantWindow <= 0 {
+		c.InstantWindow = 10 * time.Second
+	}
+	if c.EMAHalfLife <= 0 {
+		c.EMAHalfLife = 5 * time.Minute
+	}
 }
 
 func (c *Config) Validate() error {
@@ -101,9 +113,6 @@ func (c *Config) Validate() error {
 	}
 	if c.InstantWindow < 0 {
 		return fmt.Errorf("instant_window must not be negative")
-	}
-	if c.EMAHalfLife <= 0 {
-		return fmt.Errorf("ema_half_life must be positive")
 	}
 
 	return nil

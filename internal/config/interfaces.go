@@ -27,11 +27,47 @@ var defaultIgnorePatterns = []string{
 	"calico*",
 }
 
-// DiscoverTransitInterfaces returns up WireGuard and Ethernet interfaces suitable
-// for TC egress attachment, excluding configured and built-in ignore patterns.
-func DiscoverTransitInterfaces(ignore []string) ([]string, error) {
-	patterns := append(append([]string{}, defaultIgnorePatterns...), ignore...)
+// TransitInterfaceNames returns configured interfaces, or auto-discovers
+// up WireGuard and Ethernet interfaces when the list is empty.
+func (c *Config) TransitInterfaceNames() ([]string, error) {
+	if len(c.Interfaces) > 0 {
+		return resolveInterfaceNames(c.Interfaces)
+	}
+	return DiscoverTransitInterfaces()
+}
 
+func resolveInterfaceNames(names []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(names))
+	var out []string
+
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		iface, err := net.InterfaceByName(name)
+		if err != nil {
+			return nil, fmt.Errorf("lookup %q: %w", name, err)
+		}
+		if iface.Flags&net.FlagUp == 0 {
+			return nil, fmt.Errorf("interface %q is not up", name)
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no transit interfaces configured")
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// DiscoverTransitInterfaces returns up WireGuard and Ethernet interfaces suitable
+// for TC egress attachment, excluding built-in ignore patterns.
+func DiscoverTransitInterfaces() ([]string, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil, fmt.Errorf("list interfaces: %w", err)
@@ -45,7 +81,7 @@ func DiscoverTransitInterfaces(ignore []string) ([]string, error) {
 		if iface.Flags&net.FlagUp == 0 {
 			continue
 		}
-		if ShouldIgnore(iface.Name, patterns) {
+		if ShouldIgnore(iface.Name, defaultIgnorePatterns) {
 			continue
 		}
 		if isWireguard(iface.Name) || isEthernet(iface.Name) {
