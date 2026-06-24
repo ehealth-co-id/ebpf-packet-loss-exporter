@@ -46,7 +46,8 @@ Production config: `/etc/ebpf_packet_loss_exporter/config.yml`
 ```yaml
 source_zone: e
 listen: :9435
-poll_interval: 15s
+poll_interval: 1s
+instant_window: 10s
 
 interfaces:
   wireguard: [wg0]
@@ -85,7 +86,7 @@ When deploying, **trim** wg/l2 targets from `network_exporter.yml`; keep `*-dire
 
 | Metric | Type | Description |
 |---|---|---|
-| `ebpf_packet_loss_percent` | Gauge | Instant loss from last poll window |
+| `ebpf_packet_loss_percent` | Gauge | Rolling short-window loss ratio (default 10s) |
 | `ebpf_packet_loss_percent_ema` | Gauge | EMA-smoothed approximate loss (primary for dashboards) |
 | `ebpf_packet_loss_segments_total` | Counter | Raw BPF segments, exact (debug) |
 | `ebpf_packet_loss_retrans_total` | Counter | Raw BPF retransmits, approximate (debug) |
@@ -138,7 +139,7 @@ ebpf_packet_loss_debug_tcp_zoned_total     # matched source_zone + remote dst_zo
 
 Zone subnets must match **source and destination IPs** seen on the wire (e.g. `192.168.3.0/24` for zone `e`), not WireGuard peer endpoint addresses.
 
-EMA updates on an internal poll loop (`poll_interval`, default 15s) independent of Prometheus scrapes. During scrape gaps the exporter keeps observing traffic; when scrapes resume the EMA gauge reflects the outage window.
+EMA updates on an internal poll loop (`poll_interval`, default 1s) independent of Prometheus scrapes. `ebpf_packet_loss_percent` aggregates the last `instant_window` (default 10s) of per-poll deltas. During scrape gaps the exporter keeps observing traffic; when scrapes resume the EMA gauge reflects the outage window.
 
 ## Install
 
@@ -168,7 +169,7 @@ curl -s localhost:9435/metrics | grep ebpf_packet_loss_percent_ema
 - Bloom epoch rolls every 1.5 seconds; seq reuse across epochs on long-lived flows can cause spurious duplicates
 - Global Bloom bitmap shared across CPUs; cross-core atomic contention at very high PPS — hash-to-slot sharding is the scale-up path if profiling shows a bottleneck
 - Fixed ~1 MB global Bloom bitmap regardless of flow count
-- Quiet paths: EMA holds last value; instant may be 0
+- Quiet paths: EMA holds last value; instant may read 0 when the rolling window has no segments
 - TCP IPv4 only
 - TCX egress on kernel 6.6+; clsact TC egress fallback on older kernels
 - Egress TC may observe pre-GSO skbs; `seq >> 4` bucketing tolerates minor segmentation variance

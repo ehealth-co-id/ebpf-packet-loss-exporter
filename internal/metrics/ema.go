@@ -13,6 +13,11 @@ type CounterSnapshot struct {
 	Retrans  uint64
 }
 
+type sample struct {
+	seg uint64
+	ret uint64
+}
+
 type TargetState struct {
 	Target         config.ResolvedTarget
 	LastSegments   uint64
@@ -21,6 +26,12 @@ type TargetState struct {
 	EMAPercent     float64
 	LastUpdate     time.Time
 	LastPoll       time.Time
+	window         []sample
+	windowCap      int
+	windowPos      int
+	windowLen      int
+	sumSeg         uint64
+	sumRet         uint64
 }
 
 type EMAStore struct {
@@ -29,10 +40,23 @@ type EMAStore struct {
 	states map[string]*TargetState
 }
 
+func instantWindowCap(cfg *config.Config) int {
+	n := int(cfg.InstantWindow / cfg.PollInterval)
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
 func NewEMAStore(cfg *config.Config, targets []config.ResolvedTarget) *EMAStore {
+	cap := instantWindowCap(cfg)
 	states := make(map[string]*TargetState, len(targets))
 	for _, t := range targets {
-		states[t.Name] = &TargetState{Target: t}
+		states[t.Name] = &TargetState{
+			Target:    t,
+			window:    make([]sample, cap),
+			windowCap: cap,
+		}
 	}
 	return &EMAStore{
 		cfg:    cfg,
@@ -66,8 +90,20 @@ func (s *EMAStore) Update(now time.Time, counters map[string]CounterSnapshot) {
 			dt = now.Sub(state.LastPoll)
 		}
 
-		if deltaSeg > 0 {
-			instant := 100.0 * float64(deltaRet) / float64(deltaSeg)
+		if state.windowLen == state.windowCap {
+			old := state.window[state.windowPos]
+			state.sumSeg -= old.seg
+			state.sumRet -= old.ret
+		} else {
+			state.windowLen++
+		}
+		state.window[state.windowPos] = sample{seg: deltaSeg, ret: deltaRet}
+		state.sumSeg += deltaSeg
+		state.sumRet += deltaRet
+		state.windowPos = (state.windowPos + 1) % state.windowCap
+
+		if state.sumSeg > 0 {
+			instant := 100.0 * float64(state.sumRet) / float64(state.sumSeg)
 			state.InstantPercent = instant
 
 			alpha := s.cfg.Alpha(dt)
@@ -78,7 +114,7 @@ func (s *EMAStore) Update(now time.Time, counters map[string]CounterSnapshot) {
 			}
 			state.LastUpdate = now
 		}
-		// When deltaSeg == 0: hold EMA and instant values unchanged.
+		// When sumSeg == 0: hold EMA and instant values unchanged.
 
 		state.LastSegments = snap.Segments
 		state.LastRetrans = snap.Retrans

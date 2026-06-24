@@ -11,10 +11,11 @@ import (
 )
 
 type Config struct {
-	SourceZone   string        `yaml:"source_zone"`
-	Listen       string        `yaml:"listen"`
-	PollInterval time.Duration `yaml:"poll_interval"`
-	Interfaces   Interfaces    `yaml:"interfaces"`
+	SourceZone    string        `yaml:"source_zone"`
+	Listen        string        `yaml:"listen"`
+	PollInterval  time.Duration `yaml:"poll_interval"`
+	InstantWindow time.Duration `yaml:"instant_window"`
+	Interfaces    Interfaces    `yaml:"interfaces"`
 	Zones        map[string]Zone `yaml:"zones"`
 	Targets      []Target      `yaml:"targets"`
 	EMA          EMAConfig     `yaml:"ema"`
@@ -64,8 +65,9 @@ func Load(path string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		Listen:       ":9435",
-		PollInterval: 1 * time.Second,
+		Listen:        ":9435",
+		PollInterval:  1 * time.Second,
+		InstantWindow: 10 * time.Second,
 		EMA: EMAConfig{
 			HalfLife: 5 * time.Minute,
 		},
@@ -142,6 +144,9 @@ func (c *Config) Validate() error {
 
 	if c.PollInterval <= 0 {
 		return fmt.Errorf("poll_interval must be positive")
+	}
+	if c.InstantWindow < 0 {
+		return fmt.Errorf("instant_window must not be negative")
 	}
 	if c.EMA.HalfLife <= 0 && c.EMA.Alpha == nil {
 		return fmt.Errorf("ema.half_life must be positive when alpha is not set")
