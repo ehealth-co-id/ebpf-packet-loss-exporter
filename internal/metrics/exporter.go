@@ -1,11 +1,16 @@
 package metrics
 
 import (
+	"math"
 	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+func floorToTwoDecimals(v float64) float64 {
+	return math.Floor(v*100) / 100
+}
 
 type Exporter struct {
 	registry *prometheus.Registry
@@ -58,8 +63,8 @@ func (e *Exporter) Publish(states []ZoneState) {
 			"dst_zone":    st.DstZone,
 		}
 
-		e.percent.With(labels).Set(st.InstantPercent)
-		e.percentEMA.With(labels).Set(st.EMAPercent)
+		e.percent.With(labels).Set(floorToTwoDecimals(st.InstantPercent))
+		e.percentEMA.With(labels).Set(floorToTwoDecimals(st.EMAPercent))
 
 		if !st.LastUpdate.IsZero() {
 			e.emaTimestamp.With(labels).Set(float64(st.LastUpdate.Unix()))
