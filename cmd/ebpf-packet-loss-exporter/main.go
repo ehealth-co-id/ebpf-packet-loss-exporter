@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -9,8 +8,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
+	"os"
 	"os/signal"
-	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -21,73 +22,73 @@ import (
 	"github.com/ehealth-id/ebpf-packet-loss-exporter/internal/tcattach"
 )
 
+const statsEventSize = 8 // mirrors struct stats_event in bpf/packet_loss.bpf.c
+
 type accumulator struct {
-	mu   sync.Mutex
-	segs map[string]uint64
-	rets map[string]uint64
+	segs      []uint64
+	rets      []uint64
+	zoneNames []string
 }
 
 func newAccumulator(zones []config.ResolvedZone) *accumulator {
+	n := len(zones)
 	acc := &accumulator{
-		segs: make(map[string]uint64, len(zones)),
-		rets: make(map[string]uint64, len(zones)),
+		segs:      make([]uint64, n),
+		rets:      make([]uint64, n),
+		zoneNames: make([]string, n),
 	}
-	for _, z := range zones {
-		acc.segs[z.DstZone] = 0
-		acc.rets[z.DstZone] = 0
+	for i, z := range zones {
+		acc.zoneNames[i] = z.DstZone
 	}
 	return acc
 }
 
-func (acc *accumulator) record(dstZone string, isRetrans bool) {
-	acc.mu.Lock()
-	defer acc.mu.Unlock()
-	acc.segs[dstZone]++
+func (acc *accumulator) record(idx int, isRetrans bool) {
+	atomic.AddUint64(&acc.segs[idx], 1)
 	if isRetrans {
-		acc.rets[dstZone]++
+		atomic.AddUint64(&acc.rets[idx], 1)
 	}
 }
 
-func (acc *accumulator) snapshotAndReset(zones []config.ResolvedZone) map[string]metrics.CounterSnapshot {
-	acc.mu.Lock()
-	defer acc.mu.Unlock()
-
-	counters := make(map[string]metrics.CounterSnapshot, len(zones))
-	for _, z := range zones {
-		counters[z.DstZone] = metrics.CounterSnapshot{
-			Segments: acc.segs[z.DstZone],
-			Retrans:  acc.rets[z.DstZone],
+func (acc *accumulator) snapshotAndReset(_ []config.ResolvedZone) map[string]metrics.CounterSnapshot {
+	counters := make(map[string]metrics.CounterSnapshot, len(acc.zoneNames))
+	for i, name := range acc.zoneNames {
+		segs := atomic.SwapUint64(&acc.segs[i], 0)
+		rets := atomic.SwapUint64(&acc.rets[i], 0)
+		counters[name] = metrics.CounterSnapshot{
+			Segments: segs,
+			Retrans:  rets,
 		}
-		acc.segs[z.DstZone] = 0
-		acc.rets[z.DstZone] = 0
 	}
 	return counters
 }
 
-func buildZoneIndex(zones []config.ResolvedZone) map[uint8]string {
-	out := make(map[uint8]string, len(zones))
-	for _, z := range zones {
-		out[z.ZoneID] = z.DstZone
+func buildZoneIndex(zones []config.ResolvedZone) map[uint8]int {
+	out := make(map[uint8]int, len(zones))
+	for i, z := range zones {
+		out[z.ZoneID] = i
 	}
 	return out
 }
 
 func parseStatsEvent(raw []byte) (bpf.StatsEvent, error) {
-	var evt bpf.StatsEvent
-	if len(raw) < binary.Size(&evt) {
-		return evt, fmt.Errorf("short ringbuf sample: %d bytes", len(raw))
+	if len(raw) < statsEventSize {
+		return bpf.StatsEvent{}, fmt.Errorf("short ringbuf sample: %d bytes", len(raw))
 	}
-	if err := binary.Read(bytes.NewReader(raw), binary.NativeEndian, &evt); err != nil {
-		return evt, err
-	}
-	return evt, nil
+	return bpf.StatsEvent{
+		IfIndex:   binary.NativeEndian.Uint32(raw[0:4]),
+		DstZoneID: raw[4],
+		IsRetrans: raw[5],
+		// Pad intentionally ignored
+	}, nil
 }
 
-func startRingbufReader(ctx context.Context, rd *ringbuf.Reader, zoneByID map[uint8]string, acc *accumulator) {
+func startRingbufReader(ctx context.Context, rd *ringbuf.Reader, zoneByID map[uint8]int, acc *accumulator) {
 	go func() {
 		var unknownZone uint64
+		var rec ringbuf.Record
 		for {
-			rec, err := rd.Read()
+			err := rd.ReadInto(&rec)
 			if err != nil {
 				if errors.Is(err, ringbuf.ErrClosed) || ctx.Err() != nil {
 					return
@@ -95,23 +96,44 @@ func startRingbufReader(ctx context.Context, rd *ringbuf.Reader, zoneByID map[ui
 				log.Printf("ringbuf read: %v", err)
 				continue
 			}
-
-			evt, err := parseStatsEvent(rec.RawSample)
-			if err != nil {
-				log.Printf("ringbuf parse: %v", err)
-				continue
-			}
-
-			dstZone, ok := zoneByID[evt.DstZoneID]
-			if !ok {
-				unknownZone++
-				if unknownZone == 1 || unknownZone%1000 == 0 {
-					log.Printf("ringbuf: unknown dst_zone_id=%d (ifindex=%d), dropped %d events so far",
-						evt.DstZoneID, evt.IfIndex, unknownZone)
+			// Process the first record from the blocking read, then drain all
+			// remaining records without additional syscall round-trips.
+			for {
+				evt, evtErr := parseStatsEvent(rec.RawSample)
+				if evtErr != nil {
+					log.Printf("ringbuf parse: %v", evtErr)
+				} else {
+					idx, ok := zoneByID[evt.DstZoneID]
+					if !ok {
+						unknownZone++
+						if unknownZone == 1 || unknownZone%1000 == 0 {
+							log.Printf("ringbuf: unknown dst_zone_id=%d (ifindex=%d), dropped %d events so far",
+								evt.DstZoneID, evt.IfIndex, unknownZone)
+						}
+					} else {
+						acc.record(idx, evt.IsRetrans != 0)
+					}
 				}
-				continue
+
+				// Try to drain the next record without blocking.
+				rd.SetDeadline(time.Now())
+				err = rd.ReadInto(&rec)
+				if err != nil {
+					if errors.Is(err, os.ErrDeadlineExceeded) {
+						// All buffered records consumed; prepare to block on the
+						// next iteration.
+						rd.SetDeadline(time.Time{})
+						break
+					}
+					if errors.Is(err, ringbuf.ErrClosed) || ctx.Err() != nil {
+						return
+					}
+					log.Printf("ringbuf read: %v", err)
+					rd.SetDeadline(time.Time{})
+					break
+				}
+				// rec has been populated; loop to process it.
 			}
-			acc.record(dstZone, evt.IsRetrans != 0)
 		}
 	}()
 }
@@ -119,6 +141,7 @@ func startRingbufReader(ctx context.Context, rd *ringbuf.Reader, zoneByID map[ui
 func main() {
 	configPath := flag.String("config", "/etc/ebpf_packet_loss_exporter/config.yml", "path to config file")
 	listen := flag.String("listen", "", "listen address (overrides config)")
+	pprofAddr := flag.String("pprof", "", "pprof listen address (e.g. localhost:6060)")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
@@ -194,6 +217,15 @@ func main() {
 			log.Fatalf("http: %v", err)
 		}
 	}()
+
+	if *pprofAddr != "" {
+		go func() {
+			log.Printf("pprof listening on %s", *pprofAddr)
+			if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
+				log.Printf("pprof server: %v", err)
+			}
+		}()
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()

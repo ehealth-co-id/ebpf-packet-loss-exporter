@@ -53,10 +53,10 @@ func (e *Exporter) Handler() http.Handler {
 }
 
 func (e *Exporter) Publish(states []ZoneState) {
-	e.percent.Reset()
-	e.percentEMA.Reset()
-	e.emaTimestamp.Reset()
-
+	// NOTE: We intentionally do NOT call Reset() here. The zone set is fixed at
+	// startup, so With(labels).Set(v) updates entries in place. Removing Reset()
+	// also avoids flapping: a silent zone's last-update timestamp persists
+	// across polls instead of disappearing and reappearing.
 	for _, st := range states {
 		labels := prometheus.Labels{
 			"source_zone": st.SourceZone,
