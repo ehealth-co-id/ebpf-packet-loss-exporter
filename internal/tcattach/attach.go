@@ -211,6 +211,48 @@ func (a *Attachment) Close() error {
 	return nil
 }
 
+// CleanupEgress removes any stale TC egress filters named "path_egress" on the
+// given interface. These are left behind if a previous exporter instance crashed
+// or was SIGKILLed before it could clean up. This function is a no-op if no
+// such filters exist.
+func CleanupEgress(ifaceName string) error {
+	iface, err := net.InterfaceByName(ifaceName)
+	if err != nil {
+		return fmt.Errorf("interface %q: %w", ifaceName, err)
+	}
+
+	link, err := netlink.LinkByIndex(iface.Index)
+	if err != nil {
+		return fmt.Errorf("netlink lookup %q: %w", ifaceName, err)
+	}
+
+	parent := uint32(netlink.HANDLE_MIN_EGRESS)
+	filters, err := netlink.FilterList(link, parent)
+	if err != nil {
+		return fmt.Errorf("list filters on %q: %w", ifaceName, err)
+	}
+
+	var removed int
+	for _, f := range filters {
+		bf, ok := f.(*netlink.BpfFilter)
+		if !ok {
+			continue
+		}
+		if bf.Name != "path_egress" {
+			continue
+		}
+		if err := netlink.FilterDel(f); err != nil {
+			return fmt.Errorf("delete stale filter on %q: %w", ifaceName, err)
+		}
+		removed++
+	}
+
+	if removed > 0 {
+		log.Printf("cleaned up %d stale egress filter(s) on %q", removed, ifaceName)
+	}
+	return nil
+}
+
 func AttachAll(names []string, prog *ebpf.Program, coll *bpf.Collection) ([]*Attachment, error) {
 	var attachments []*Attachment
 	for _, name := range names {

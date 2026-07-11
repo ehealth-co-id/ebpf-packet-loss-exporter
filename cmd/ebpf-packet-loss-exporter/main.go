@@ -177,6 +177,12 @@ func main() {
 
 	zones := cfg.RemoteZones()
 
+	for _, name := range ifaceNames {
+		if err := tcattach.CleanupEgress(name); err != nil {
+			log.Printf("cleanup stale filters on %q: %v", name, err)
+		}
+	}
+
 	attachments, err := tcattach.AttachAll(ifaceNames, coll.Program(), coll)
 	if err != nil {
 		log.Fatalf("tc attach: %v", err)
