@@ -255,8 +255,9 @@ func main() {
 			if userSegs == 0 && dbg.TCPPackets == 0 {
 				zeroPolls++
 				if zeroPolls == 1 || zeroPolls%60 == 0 {
-					log.Printf("poll: no TCP segments yet (bpf tcp=%d zoned=%d); check interfaces, subnets, and inter-zone traffic",
-						dbg.TCPPackets, dbg.TCPZoned)
+					log.Printf("poll: no TCP segments; seen=%d not_ipv4=%d not_tcp=%d tcp_short=%d pure_ack=%d tcp=%d no_src_zone=%d no_dst_zone=%d zoned=%d",
+						dbg.Seen, dbg.NotIPv4, dbg.NotTCP, dbg.TCPShort, dbg.TCPPureAck,
+						dbg.TCPPackets, dbg.NoSrcZone, dbg.NoDstZone, dbg.TCPZoned)
 				}
 			} else if userSegs == 0 && dbg.TCPZoned > 0 {
 				log.Printf("poll: bpf zoned=%d but userspace=0; check zone_id mapping (bpf zoned tcp=%d)",

@@ -33,7 +33,14 @@ type linkCloser interface {
 }
 
 type DebugCounters struct {
+	Seen       uint64
+	NotIPv4    uint64
+	NotTCP     uint64
+	TCPShort   uint64
+	TCPPureAck uint64
 	TCPPackets uint64
+	NoSrcZone  uint64
+	NoDstZone  uint64
 	TCPZoned   uint64
 }
 
@@ -79,7 +86,36 @@ func (c *Collection) NewRingbufReader() (*ringbuf.Reader, error) {
 func (c *Collection) ReadDebugCounters() (DebugCounters, error) {
 	var out DebugCounters
 	var err error
+
+	out.Seen, err = sumPerCPUArray(c.objs.DebugSeen)
+	if err != nil {
+		return out, err
+	}
+	out.NotIPv4, err = sumPerCPUArray(c.objs.DebugNotIpv4)
+	if err != nil {
+		return out, err
+	}
+	out.NotTCP, err = sumPerCPUArray(c.objs.DebugNotTcp)
+	if err != nil {
+		return out, err
+	}
+	out.TCPShort, err = sumPerCPUArray(c.objs.DebugTcpShort)
+	if err != nil {
+		return out, err
+	}
+	out.TCPPureAck, err = sumPerCPUArray(c.objs.DebugTcpPureAck)
+	if err != nil {
+		return out, err
+	}
 	out.TCPPackets, err = sumPerCPUArray(c.objs.DebugTcpPayload)
+	if err != nil {
+		return out, err
+	}
+	out.NoSrcZone, err = sumPerCPUArray(c.objs.DebugNoSrcZone)
+	if err != nil {
+		return out, err
+	}
+	out.NoDstZone, err = sumPerCPUArray(c.objs.DebugNoDstZone)
 	if err != nil {
 		return out, err
 	}

@@ -62,7 +62,14 @@ type PacketLossProgramSpecs struct {
 type PacketLossMapSpecs struct {
 	BloomBits       *ebpf.MapSpec `ebpf:"bloom_bits"`
 	BloomEpoch      *ebpf.MapSpec `ebpf:"bloom_epoch"`
+	DebugNoDstZone  *ebpf.MapSpec `ebpf:"debug_no_dst_zone"`
+	DebugNoSrcZone  *ebpf.MapSpec `ebpf:"debug_no_src_zone"`
+	DebugNotIpv4    *ebpf.MapSpec `ebpf:"debug_not_ipv4"`
+	DebugNotTcp     *ebpf.MapSpec `ebpf:"debug_not_tcp"`
+	DebugSeen       *ebpf.MapSpec `ebpf:"debug_seen"`
 	DebugTcpPayload *ebpf.MapSpec `ebpf:"debug_tcp_payload"`
+	DebugTcpPureAck *ebpf.MapSpec `ebpf:"debug_tcp_pure_ack"`
+	DebugTcpShort   *ebpf.MapSpec `ebpf:"debug_tcp_short"`
 	DebugTcpZoned   *ebpf.MapSpec `ebpf:"debug_tcp_zoned"`
 	SrcZoneLpm      *ebpf.MapSpec `ebpf:"src_zone_lpm"`
 	StatsRb         *ebpf.MapSpec `ebpf:"stats_rb"`
@@ -90,7 +97,14 @@ func (o *PacketLossObjects) Close() error {
 type PacketLossMaps struct {
 	BloomBits       *ebpf.Map `ebpf:"bloom_bits"`
 	BloomEpoch      *ebpf.Map `ebpf:"bloom_epoch"`
+	DebugNoDstZone  *ebpf.Map `ebpf:"debug_no_dst_zone"`
+	DebugNoSrcZone  *ebpf.Map `ebpf:"debug_no_src_zone"`
+	DebugNotIpv4    *ebpf.Map `ebpf:"debug_not_ipv4"`
+	DebugNotTcp     *ebpf.Map `ebpf:"debug_not_tcp"`
+	DebugSeen       *ebpf.Map `ebpf:"debug_seen"`
 	DebugTcpPayload *ebpf.Map `ebpf:"debug_tcp_payload"`
+	DebugTcpPureAck *ebpf.Map `ebpf:"debug_tcp_pure_ack"`
+	DebugTcpShort   *ebpf.Map `ebpf:"debug_tcp_short"`
 	DebugTcpZoned   *ebpf.Map `ebpf:"debug_tcp_zoned"`
 	SrcZoneLpm      *ebpf.Map `ebpf:"src_zone_lpm"`
 	StatsRb         *ebpf.Map `ebpf:"stats_rb"`
@@ -101,7 +115,14 @@ func (m *PacketLossMaps) Close() error {
 	return _PacketLossClose(
 		m.BloomBits,
 		m.BloomEpoch,
+		m.DebugNoDstZone,
+		m.DebugNoSrcZone,
+		m.DebugNotIpv4,
+		m.DebugNotTcp,
+		m.DebugSeen,
 		m.DebugTcpPayload,
+		m.DebugTcpPureAck,
+		m.DebugTcpShort,
 		m.DebugTcpZoned,
 		m.SrcZoneLpm,
 		m.StatsRb,

@@ -83,6 +83,55 @@ struct {
 	__uint(value_size, sizeof(__u64));
 } debug_tcp_zoned SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__uint(key_size, sizeof(__u32));
+	__uint(value_size, sizeof(__u64));
+} debug_seen SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__uint(key_size, sizeof(__u32));
+	__uint(value_size, sizeof(__u64));
+} debug_not_ipv4 SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__uint(key_size, sizeof(__u32));
+	__uint(value_size, sizeof(__u64));
+} debug_not_tcp SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__uint(key_size, sizeof(__u32));
+	__uint(value_size, sizeof(__u64));
+} debug_tcp_short SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__uint(key_size, sizeof(__u32));
+	__uint(value_size, sizeof(__u64));
+} debug_tcp_pure_ack SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__uint(key_size, sizeof(__u32));
+	__uint(value_size, sizeof(__u64));
+} debug_no_src_zone SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__uint(key_size, sizeof(__u32));
+	__uint(value_size, sizeof(__u64));
+} debug_no_dst_zone SEC(".maps");
+
 static __always_inline void debug_inc(void *map)
 {
 	__u32 k = 0;
@@ -237,26 +286,38 @@ int path_egress(struct __sk_buff *skb)
 	data = (void *)(long)skb->data;
 	data_end = (void *)(long)skb->data_end;
 
-	if (parse_ipv4(skb, data, data_end, &iph) < 0)
-		return TC_ACT_OK;
+	debug_inc(&debug_seen);
 
-	if (iph->protocol != IPPROTO_TCP)
+	if (parse_ipv4(skb, data, data_end, &iph) < 0) {
+		debug_inc(&debug_not_ipv4);
 		return TC_ACT_OK;
+	}
+
+	if (iph->protocol != IPPROTO_TCP) {
+		debug_inc(&debug_not_tcp);
+		return TC_ACT_OK;
+	}
 
 	tcph = (void *)iph + (iph->ihl * 4);
-	if ((void *)(tcph + 1) > data_end)
+	if ((void *)(tcph + 1) > data_end) {
+		debug_inc(&debug_tcp_short);
 		return TC_ACT_OK;
+	}
 
 	__u16 tcp_hdr_len = tcph->doff * 4;
 
-	if (tcp_hdr_len < sizeof(*tcph))
+	if (tcp_hdr_len < sizeof(*tcph)) {
+		debug_inc(&debug_tcp_short);
 		return TC_ACT_OK;
+	}
 
 	__u16 ip_total = bpf_ntohs(iph->tot_len);
 	__u32 ip_hdr_len = iph->ihl * 4;
 
-	if (ip_total < ip_hdr_len + tcp_hdr_len)
+	if (ip_total < ip_hdr_len + tcp_hdr_len) {
+		debug_inc(&debug_tcp_short);
 		return TC_ACT_OK;
+	}
 
 	__u32 payload_len = ip_total - ip_hdr_len - tcp_hdr_len;
 
@@ -264,21 +325,27 @@ int path_egress(struct __sk_buff *skb)
 	syn = tcph->syn;
 	rst = tcph->rst;
 
-	if (payload_len == 0 && !syn && !fin && !rst)
+	if (payload_len == 0 && !syn && !fin && !rst) {
+		debug_inc(&debug_tcp_pure_ack);
 		return TC_ACT_OK;
+	}
 
 	debug_inc(&debug_tcp_payload);
 
 	lpm_key[0] = 32;
 	lpm_key[1] = iph->saddr;
 	src_zone = bpf_map_lookup_elem(&src_zone_lpm, lpm_key);
-	if (!src_zone)
+	if (!src_zone) {
+		debug_inc(&debug_no_src_zone);
 		return TC_ACT_OK;
+	}
 
 	lpm_key[1] = iph->daddr;
 	zone_id = bpf_map_lookup_elem(&zone_lpm, lpm_key);
-	if (!zone_id)
+	if (!zone_id) {
+		debug_inc(&debug_no_dst_zone);
 		return TC_ACT_OK;
+	}
 
 	debug_inc(&debug_tcp_zoned);
 
