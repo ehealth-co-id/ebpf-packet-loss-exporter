@@ -9,7 +9,39 @@ CONFIG_DIR="/etc/ebpf_packet_loss_exporter"
 BINARY="ebpf_packet_loss_exporter"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
-echo "[*] Installing ${SERVICE_NAME} from latest release..."
+VERSION="latest"
+usage() {
+  cat <<EOF
+Usage: $0 [--version <ref>]
+  --version <ref>   Release to install (default: latest). Examples: latest, v1.2.3, 1.2.3.
+  -h, --help        Show this help and exit.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --version)
+      [[ $# -lt 2 ]] && { echo "ERROR: --version requires a value" >&2; exit 2; }
+      VERSION="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --version=*)
+      VERSION="${1#*=}"
+      shift
+      ;;
+    *)
+      echo "ERROR: Unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+echo "[*] Installing ${SERVICE_NAME} from ${VERSION} release..."
 
 # 1. Pre-flight checks
 if [[ $EUID -ne 0 ]]; then
@@ -28,12 +60,20 @@ esac
 
 ASSET_NAME="${BINARY}-linux-${GOARCH}"
 
-# 2. Fetch latest release asset URL
-echo "[*] Fetching latest release information..."
+# 2. Fetch release asset URL
+echo "[*] Fetching release information for ${VERSION}..."
+if [[ "$VERSION" == "latest" ]]; then
+  RELEASE_URL="https://api.github.com/repos/${REPO}/releases/latest"
+else
+  # Normalize to a leading "v" tag
+  TAG="${VERSION/#/v}"
+  TAG="${TAG/#vv/v}"
+  RELEASE_URL="https://api.github.com/repos/${REPO}/releases/tags/${TAG}"
+fi
 RELEASE_JSON=$(curl -fsSL \
   -H "Accept: application/vnd.github+json" \
   -H "User-Agent: ebpf-packet-loss-exporter-install" \
-  "https://api.github.com/repos/${REPO}/releases/latest")
+  "$RELEASE_URL")
 
 ASSET_URL=$(echo "$RELEASE_JSON" | grep -oE "https://[^\"]+/${ASSET_NAME}\"" | head -1 | tr -d '"')
 
