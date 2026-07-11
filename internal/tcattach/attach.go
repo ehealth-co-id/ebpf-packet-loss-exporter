@@ -211,11 +211,75 @@ func (a *Attachment) Close() error {
 	return nil
 }
 
-// CleanupEgress removes any stale TC egress filters named "path_egress" on the
-// given interface. These are left behind if a previous exporter instance crashed
-// or was SIGKILLed before it could clean up. This function is a no-op if no
-// such filters exist.
+// detachStaleTCXLinks iterates all kernel BPF links and detaches any TCX egress
+// links on the given interface whose program name matches "path_egress" or
+// "transit_egress". These are left behind if a previous exporter instance
+// crashed or was SIGKILLed before it could clean up.
+func detachStaleTCXLinks(ifaceName string) {
+	iface, err := net.InterfaceByName(ifaceName)
+	if err != nil {
+		return
+	}
+	it := new(link.Iterator)
+	defer it.Close()
+	for it.Next() {
+		id := it.ID
+		l := it.Take()
+		if l == nil {
+			continue
+		}
+		info, err := l.Info()
+		if err != nil {
+			l.Close()
+			continue
+		}
+		tcx := info.TCX()
+		if tcx == nil || tcx.Ifindex != uint32(iface.Index) {
+			l.Close()
+			continue
+		}
+		if uint32(tcx.AttachType) != uint32(ebpf.AttachTCXEgress) {
+			l.Close()
+			continue
+		}
+		prog, err := ebpf.NewProgramFromID(info.Program)
+		if err != nil {
+			l.Close()
+			continue
+		}
+		pi, err := prog.Info()
+		prog.Close()
+		if err != nil {
+			l.Close()
+			continue
+		}
+		name := pi.Name
+		if isStaleEgressProg(name) {
+			if err := l.Close(); err != nil {
+				log.Printf("detach stale tcx link %d (%s) on %q: %v", id, name, ifaceName, err)
+			} else {
+				log.Printf("detached stale tcx link %d (%s) on %q", id, name, ifaceName)
+			}
+		} else {
+			l.Close()
+		}
+	}
+}
+
+// isStaleEgressProg returns true if the program name matches a known stale
+// egress BPF program. Uses prefix match because the kernel truncates names
+// to 15 characters (TCB).
+func isStaleEgressProg(name string) bool {
+	return strings.HasPrefix(name, "path_egress") || strings.HasPrefix(name, "transit_egress")
+}
+
+// CleanupEgress removes any stale TC egress programs on the given interface
+// that were left behind by a previous exporter instance that crashed or was
+// SIGKILLed. Handles both TCX links and clsact filters. This function is a
+// no-op if no such programs exist.
 func CleanupEgress(ifaceName string) error {
+	detachStaleTCXLinks(ifaceName)
+
 	iface, err := net.InterfaceByName(ifaceName)
 	if err != nil {
 		return fmt.Errorf("interface %q: %w", ifaceName, err)
@@ -238,7 +302,7 @@ func CleanupEgress(ifaceName string) error {
 		if !ok {
 			continue
 		}
-		if bf.Name != "path_egress" {
+		if !isStaleEgressProg(bf.Name) {
 			continue
 		}
 		if err := netlink.FilterDel(f); err != nil {
