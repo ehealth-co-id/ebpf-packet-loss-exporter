@@ -234,9 +234,6 @@ int path_egress(struct __sk_buff *skb)
 	__u8 is_retrans;
 	struct stats_event *evt;
 
-	if (bpf_skb_pull_data(skb, 0) < 0)
-		return TC_ACT_OK;
-
 	data = (void *)(long)skb->data;
 	data_end = (void *)(long)skb->data_end;
 
