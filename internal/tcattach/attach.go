@@ -205,9 +205,13 @@ func (a *Attachment) Close() error {
 
 // detachStaleTCXLinks iterates all kernel BPF links and detaches any TCX egress
 // links on the given interface whose program name matches "path_egress" or
-// "transit_egress". These are left behind if a previous exporter instance
-// crashed or was SIGKILLed before it could clean up.
-func detachStaleTCXLinks(ifaceName string) {
+// "transit_egress" AND whose bytecode tag matches ownTag. These are left
+// behind if a previous exporter instance crashed or was SIGKILLed before it
+// could clean up. The tag check (a kernel-computed hash of the program's
+// instructions, from the program we're about to load ourselves) guards
+// against tearing down an unrelated program that happens to share our name
+// on a shared host.
+func detachStaleTCXLinks(ifaceName string, ownTag string) {
 	iface, err := net.InterfaceByName(ifaceName)
 	if err != nil {
 		return
@@ -246,7 +250,7 @@ func detachStaleTCXLinks(ifaceName string) {
 			continue
 		}
 		name := pi.Name
-		if isStaleEgressProg(name) {
+		if isStaleEgressProg(name) && pi.Tag == ownTag {
 			if err := l.Close(); err != nil {
 				log.Printf("detach stale tcx link %d (%s) on %q: %v", id, name, ifaceName, err)
 			} else {
@@ -265,12 +269,33 @@ func isStaleEgressProg(name string) bool {
 	return strings.HasPrefix(name, "path_egress") || strings.HasPrefix(name, "transit_egress")
 }
 
+// programTag returns the kernel-computed bytecode tag for prog, used to
+// verify that a candidate stale link/filter is byte-for-byte the program we
+// are about to load, not just something with a matching name.
+func programTag(prog *ebpf.Program) (string, error) {
+	info, err := prog.Info()
+	if err != nil {
+		return "", fmt.Errorf("program info: %w", err)
+	}
+	if info.Tag == "" {
+		return "", fmt.Errorf("kernel did not report a program tag (requires Linux >= 4.13)")
+	}
+	return info.Tag, nil
+}
+
 // CleanupEgress removes any stale TC egress programs on the given interface
 // that were left behind by a previous exporter instance that crashed or was
-// SIGKILLed. Handles both TCX links and clsact filters. This function is a
-// no-op if no such programs exist.
-func CleanupEgress(ifaceName string) error {
-	detachStaleTCXLinks(ifaceName)
+// SIGKILLed. Handles both TCX links and clsact filters. Only programs whose
+// bytecode tag exactly matches prog (the program we're about to attach) are
+// removed, so this can never touch an unrelated program that merely shares
+// our naming convention. This function is a no-op if no such programs exist.
+func CleanupEgress(ifaceName string, prog *ebpf.Program) error {
+	ownTag, err := programTag(prog)
+	if err != nil {
+		return fmt.Errorf("resolve own program tag: %w", err)
+	}
+
+	detachStaleTCXLinks(ifaceName, ownTag)
 
 	iface, err := net.InterfaceByName(ifaceName)
 	if err != nil {
@@ -294,7 +319,7 @@ func CleanupEgress(ifaceName string) error {
 		if !ok {
 			continue
 		}
-		if !isStaleEgressProg(bf.Name) {
+		if !isStaleEgressProg(bf.Name) || bf.Tag != ownTag {
 			continue
 		}
 		if err := netlink.FilterDel(f); err != nil {

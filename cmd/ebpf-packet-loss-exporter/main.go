@@ -178,7 +178,7 @@ func main() {
 	zones := cfg.RemoteZones()
 
 	for _, name := range ifaceNames {
-		if err := tcattach.CleanupEgress(name); err != nil {
+		if err := tcattach.CleanupEgress(name, coll.Program()); err != nil {
 			log.Printf("cleanup stale filters on %q: %v", name, err)
 		}
 	}
