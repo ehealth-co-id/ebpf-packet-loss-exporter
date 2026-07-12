@@ -29,19 +29,11 @@ func AttachEgress(ifaceName string, prog *ebpf.Program, coll *bpf.Collection) (*
 		return nil, fmt.Errorf("interface %q: %w", ifaceName, err)
 	}
 
-	a, err := attachTCXEgress(iface, prog, coll)
-	if err == nil {
-		return a, nil
-	}
-	if !isTCXUnsupported(err) {
-		return nil, fmt.Errorf("attach tcx egress on %q: %w", ifaceName, err)
-	}
-
 	cls, err := attachClsActEgress(ifaceName, iface.Index, prog)
 	if err != nil {
 		return nil, fmt.Errorf("attach clsact egress on %q: %w", ifaceName, err)
 	}
-	log.Printf("tcx unavailable; attached clsact egress on %q", ifaceName)
+	log.Printf("attached clsact egress on %q", ifaceName)
 	coll.AddLink(cls)
 	return &Attachment{clsact: cls, ifaceIdx: iface.Index}, nil
 }
