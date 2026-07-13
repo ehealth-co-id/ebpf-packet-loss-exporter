@@ -290,25 +290,25 @@ int path_egress(struct __sk_buff *skb)
 
 	if (parse_ipv4(skb, data, data_end, &iph) < 0) {
 		debug_inc(&debug_not_ipv4);
-		return TC_ACT_OK;
+		return TC_ACT_UNSPEC;
 	}
 
 	if (iph->protocol != IPPROTO_TCP) {
 		debug_inc(&debug_not_tcp);
-		return TC_ACT_OK;
+		return TC_ACT_UNSPEC;
 	}
 
 	tcph = (void *)iph + (iph->ihl * 4);
 	if ((void *)(tcph + 1) > data_end) {
 		debug_inc(&debug_tcp_short);
-		return TC_ACT_OK;
+		return TC_ACT_UNSPEC;
 	}
 
 	__u16 tcp_hdr_len = tcph->doff * 4;
 
 	if (tcp_hdr_len < sizeof(*tcph)) {
 		debug_inc(&debug_tcp_short);
-		return TC_ACT_OK;
+		return TC_ACT_UNSPEC;
 	}
 
 	__u16 ip_total = bpf_ntohs(iph->tot_len);
@@ -316,7 +316,7 @@ int path_egress(struct __sk_buff *skb)
 
 	if (ip_total < ip_hdr_len + tcp_hdr_len) {
 		debug_inc(&debug_tcp_short);
-		return TC_ACT_OK;
+		return TC_ACT_UNSPEC;
 	}
 
 	__u32 payload_len = ip_total - ip_hdr_len - tcp_hdr_len;
@@ -327,7 +327,7 @@ int path_egress(struct __sk_buff *skb)
 
 	if (payload_len == 0 && !syn && !fin && !rst) {
 		debug_inc(&debug_tcp_pure_ack);
-		return TC_ACT_OK;
+		return TC_ACT_UNSPEC;
 	}
 
 	debug_inc(&debug_tcp_payload);
@@ -337,14 +337,14 @@ int path_egress(struct __sk_buff *skb)
 	src_zone = bpf_map_lookup_elem(&src_zone_lpm, lpm_key);
 	if (!src_zone) {
 		debug_inc(&debug_no_src_zone);
-		return TC_ACT_OK;
+		return TC_ACT_UNSPEC;
 	}
 
 	lpm_key[1] = iph->daddr;
 	zone_id = bpf_map_lookup_elem(&zone_lpm, lpm_key);
 	if (!zone_id) {
 		debug_inc(&debug_no_dst_zone);
-		return TC_ACT_OK;
+		return TC_ACT_UNSPEC;
 	}
 
 	debug_inc(&debug_tcp_zoned);
@@ -372,7 +372,7 @@ int path_egress(struct __sk_buff *skb)
 		bpf_ringbuf_submit(evt, 0);
 	}
 
-	return TC_ACT_OK;
+	return TC_ACT_UNSPEC;
 }
 
 char LICENSE[] SEC("license") = "GPL";
