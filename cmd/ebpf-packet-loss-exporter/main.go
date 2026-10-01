@@ -1,3 +1,14 @@
+// ebpf-packet-loss-exporter: TC egress eBPF TCP retransmit counter exported as
+// per-zone loss percent. Logging contract (kept deliberately dense, same shape
+// as pathprofiler):
+//
+//   - ONE summary line per tick body ("tick N: f=loss0.7%/ema0.5% c=idle
+//     seg/ret=c:0/0 f:5818/71") is emitted only when its body changed, plus a
+//     30-tick heartbeat. Per-tick seg/retrans volume rides along on emitted
+//     lines but never triggers one.
+//   - Conditions (no TCP seen, unzoned traffic, unknown-zone drops) live in the
+//     body, so they log when they start or change, never once per poll.
+//   - Per-zone per-poll counters are behind --verbose.
 package main
 
 import (
@@ -28,6 +39,7 @@ type accumulator struct {
 	segs      []uint64
 	rets      []uint64
 	zoneNames []string
+	unknown   atomic.Uint64 // events dropped for unknown zone_id; surfaced in the tick summary
 }
 
 func newAccumulator(zones []config.ResolvedZone) *accumulator {
@@ -85,7 +97,6 @@ func parseStatsEvent(raw []byte) (bpf.StatsEvent, error) {
 
 func startRingbufReader(ctx context.Context, rd *ringbuf.Reader, zoneByID map[uint8]int, acc *accumulator) {
 	go func() {
-		var unknownZone uint64
 		var rec ringbuf.Record
 		for {
 			err := rd.ReadInto(&rec)
@@ -105,11 +116,7 @@ func startRingbufReader(ctx context.Context, rd *ringbuf.Reader, zoneByID map[ui
 				} else {
 					idx, ok := zoneByID[evt.DstZoneID]
 					if !ok {
-						unknownZone++
-						if unknownZone == 1 || unknownZone%1000 == 0 {
-							log.Printf("ringbuf: unknown dst_zone_id=%d (ifindex=%d), dropped %d events so far",
-								evt.DstZoneID, evt.IfIndex, unknownZone)
-						}
+						acc.unknown.Add(1)
 					} else {
 						acc.record(idx, evt.IsRetrans != 0)
 					}
@@ -141,6 +148,7 @@ func startRingbufReader(ctx context.Context, rd *ringbuf.Reader, zoneByID map[ui
 func main() {
 	configPath := flag.String("config", "/etc/ebpf_packet_loss_exporter/config.yml", "path to config file")
 	listen := flag.String("listen", "", "listen address (overrides config)")
+	verbose := flag.Bool("verbose", false, "log per-zone per-poll counters")
 	pprofAddr := flag.String("pprof", "", "pprof listen address (e.g. localhost:6060)")
 	flag.Parse()
 
@@ -241,37 +249,55 @@ func main() {
 	ticker := time.NewTicker(cfg.PollInterval)
 	defer ticker.Stop()
 
-	var zeroPolls int
+	var (
+		tick, lastSummaryTick uint64
+		prevSummaryBody       string
+		prevTCP, prevZoned    uint64
+		zeroPolls             int
+	)
 	publish := func() {
+		now := time.Now()
+		tick++
 		counters := acc.snapshotAndReset(zones)
-		var userSegs uint64
-		for dst, c := range counters {
-			userSegs += c.Segments
-			if c.Segments > 0 {
-				log.Printf("poll: zone %s segments=%d retrans=%d", dst, c.Segments, c.Retrans)
+		if *verbose {
+			for dst, c := range counters {
+				if c.Segments > 0 {
+					log.Printf("[verbose] poll: zone %s segments=%d retrans=%d", dst, c.Segments, c.Retrans)
+				}
 			}
 		}
+
+		ema.Update(now, counters)
+		snap := ema.Snapshot()
+		prom.Publish(snap)
+
+		tc := tickCounters{Tick: tick, Unknown: acc.unknown.Load()}
+		var userSegs uint64
+		for _, st := range snap {
+			c := counters[st.DstZone]
+			userSegs += c.Segments
+			tc.Zones = append(tc.Zones, zoneTick{
+				Zone: st.DstZone, Segments: c.Segments, Retrans: c.Retrans,
+				Loss: st.InstantPercent, EMA: st.EMAPercent,
+			})
+		}
 		if dbg, err := coll.ReadDebugCounters(); err == nil {
-			if userSegs == 0 && dbg.TCPPackets == 0 {
+			tc.TCP, tc.Zoned = dbg.TCPPackets-prevTCP, dbg.TCPZoned-prevZoned
+			prevTCP, prevZoned = dbg.TCPPackets, dbg.TCPZoned
+			// The summary body flags "no-tcp"; this adds the bpf drop-reason
+			// breakdown once on entry and every 60 ticks while it persists.
+			if userSegs == 0 && tc.TCP == 0 {
 				zeroPolls++
 				if zeroPolls == 1 || zeroPolls%60 == 0 {
-					log.Printf("poll: no TCP segments; seen=%d not_ipv4=%d not_tcp=%d tcp_short=%d pure_ack=%d tcp=%d no_src_zone=%d no_dst_zone=%d zoned=%d",
+					log.Printf("no TCP segments; seen=%d not_ipv4=%d not_tcp=%d tcp_short=%d pure_ack=%d tcp=%d no_src_zone=%d no_dst_zone=%d zoned=%d",
 						dbg.Seen, dbg.NotIPv4, dbg.NotTCP, dbg.TCPShort, dbg.TCPPureAck,
 						dbg.TCPPackets, dbg.NoSrcZone, dbg.NoDstZone, dbg.TCPZoned)
 				}
-			} else if userSegs == 0 && dbg.TCPZoned > 0 {
-				log.Printf("poll: bpf zoned=%d but userspace=0; check zone_id mapping (bpf zoned tcp=%d)",
-					dbg.TCPZoned, dbg.TCPPackets)
-			} else if dbg.TCPPackets > 0 && dbg.TCPZoned == 0 {
-				log.Printf("poll: bpf tcp=%d but zoned=0; check source_zone and dst_zone subnets",
-					dbg.TCPPackets)
 			} else {
 				zeroPolls = 0
 			}
 		}
-
-		ema.Update(time.Now(), counters)
-		prom.Publish(ema.Snapshot())
+		emitTickSummary(&prevSummaryBody, &lastSummaryTick, tc)
 	}
 
 	publish()
